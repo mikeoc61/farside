@@ -1,0 +1,27 @@
+# Byte-compiled / cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# uv
+.uv/
+
+# Local runtime cache written by farside_btc.py (~/.openclaw/cache)
+# (kept here in case anyone relocates the cache into the repo dir)
+.openclaw/
+*.cache.json
+
+# OS / editor
+.DS_Store
+*.swp
+.idea/
+.vscode/
+
+# Env / secrets
+.env
+*.local

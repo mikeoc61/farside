@@ -4,4 +4,4 @@ Description=Refresh Farside BTC ETF flow cache
 [Service]
 Type=oneshot
 Environment=PATH=%h/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-ExecStart=%h/bin/farside_btc.py
+ExecStart=%h/.local/bin/farside_btc

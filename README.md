@@ -210,7 +210,7 @@ Description=Refresh Farside BTC ETF flow cache
 [Service]
 Type=oneshot
 Environment=PATH=%h/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-ExecStart=%h/bin/farside_btc.py
+ExecStart=%h/.local/bin/farside_btc
 ```
 
 `btc-flows.timer`:
@@ -238,14 +238,21 @@ Notes:
 - **uv on PATH.** systemd `--user` services start with a minimal PATH. The
   `Environment=PATH=...` line prepends `~/.local/bin` so the script's `uv run`
   shebang resolves (uv's default install location). Adjust if uv lives elsewhere.
-- **Script location.** `ExecStart` expects an executable script at
-  `~/bin/farside_btc.py`. Copy it there (with `chmod +x`) or edit `ExecStart`.
+- **Script location.** `ExecStart` runs `~/.local/bin/farside_btc`, a symlink to
+  the repo file (see Install). The symlink gives a stable path independent of
+  where the repo lives, and — since `~/.local/bin` is on PATH — also lets you run
+  `farside_btc` as a bare command. The extension is dropped intentionally; the
+  `uv run --script` shebang treats the target as a script regardless of name.
 
 Install:
 
 ```bash
-mkdir -p ~/bin ~/.config/systemd/user
-cp farside_btc.py ~/bin/ && chmod +x ~/bin/farside_btc.py
+# from the repo root: make the script executable and symlink it onto PATH
+chmod +x farside_btc.py
+mkdir -p ~/.local/bin ~/.config/systemd/user
+ln -sf "$PWD/farside_btc.py" ~/.local/bin/farside_btc
+
+# install and start the timer
 cp deploy/systemd/btc-flows.{service,timer} ~/.config/systemd/user/
 systemctl --user daemon-reload
 systemctl --user enable --now btc-flows.timer
@@ -262,8 +269,8 @@ journalctl --user -u btc-flows.service -n 20
 
 ```cron
 CRON_TZ=UTC
-30 22,23 * * *  $HOME/bin/farside_btc.py >> $HOME/.openclaw/cache/refresh.log 2>&1
-30 1    * * *   $HOME/bin/farside_btc.py >> $HOME/.openclaw/cache/refresh.log 2>&1
+30 22,23 * * *  $HOME/.local/bin/farside_btc >> $HOME/.openclaw/cache/refresh.log 2>&1
+30 1    * * *   $HOME/.local/bin/farside_btc >> $HOME/.openclaw/cache/refresh.log 2>&1
 ```
 
 ---

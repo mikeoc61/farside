@@ -1,0 +1,9 @@
+[Unit]
+Description=Schedule Farside flow refresh
+
+[Timer]
+OnCalendar=*-*-* 22,23,01:30:00 UTC
+Persistent=true
+
+[Install]
+WantedBy=timers.target

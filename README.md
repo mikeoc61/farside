@@ -10,6 +10,29 @@ graceful stale-fallback when the upstream fetch fails.
 
 ---
 
+## Intended use
+
+This was built as the data source for an openclaw-managed **morning briefing
+agent**. The deployment model:
+
+- A **systemd `--user` timer refreshes the cache each evening**, after U.S. ETF
+  flow numbers finalize, writing the complete prior trading day to
+  `~/.openclaw/cache/farside_btc.json`.
+- A **consumer invokes the script**, which fetches live and — crucially — falls
+  back to that cached prior-evening payload (marked `stale`) only if the live
+  fetch fails. The briefing always has recent, complete data, online or not.
+
+The cache is a **resilience layer, not a no-fetch read path**: a direct
+invocation always tries the live URL first and uses the cache solely as a
+fallback. The script also never returns partial current-day data — flows aren't
+final until after the close, so the current day is excluded until Farside
+publishes it (see [How it works](#how-it-works)).
+
+The cache path (`~/.openclaw/cache/`) reflects that original consumer; it's just
+a JSON file and isn't openclaw-specific.
+
+---
+
 ## Features
 
 - **Single-file, zero-config.** One Python script with inline [PEP 723](https://peps.python.org/pep-0723/)
@@ -149,7 +172,10 @@ whether IBIT accounts for ≥60% of the same-signed window total.
    `requests.Session` that first warms `farside.co.uk/` to pick up cookies.
 2. **Parse** (`parse_table`) — finds the first table whose rows start with a
    `D MMM YYYY` date, builds a header→column-index map, and reads per-ETF flows.
-3. **Summarize** (`summarize`) — computes window nets, streak, and age.
+3. **Summarize** (`summarize`) — computes window nets, streak, and age over the
+   *reported* rows. `_reported()` discards the current-day row until Farside
+   publishes its numbers (surfaced as `pending_today`), so `as_of` is always the
+   latest **finalized** day and running mid-session never yields partial data.
 4. **Cache** (`save_cache` / `load_cache`) — writes the payload; on any fetch or
    parse error, `get_flows` returns the last cached payload flagged `stale`.
 
@@ -168,13 +194,76 @@ Farside is unreachable or changes its layout.
 
 ---
 
-## Scheduling (optional)
+## Scheduling (systemd `--user`)
 
-Run it on a cron for a daily flow snapshot:
+The intended deployment runs the script on a `--user` systemd timer that
+refreshes the cache each evening (after U.S. ETF flows finalize), so a morning
+consumer reads complete prior-day data. Ready-to-use units are in
+[`deploy/systemd/`](deploy/systemd/).
+
+`btc-flows.service`:
+
+```ini
+[Unit]
+Description=Refresh Farside BTC ETF flow cache
+
+[Service]
+Type=oneshot
+Environment=PATH=%h/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ExecStart=%h/bin/farside_btc.py
+```
+
+`btc-flows.timer`:
+
+```ini
+[Unit]
+Description=Schedule Farside flow refresh
+
+[Timer]
+OnCalendar=*-*-* 22,23,01:30:00 UTC
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+```
+
+Notes:
+
+- **Timing.** `OnCalendar` fires at 22:30, 23:30, and 01:30 UTC — three
+  early-evening-to-night (U.S. Eastern) attempts to capture the finalized
+  prior-day flows and survive a late publish or a transient fetch failure. Each
+  run overwrites the cache.
+- **`Persistent=true`** re-runs a missed timer after the machine boots/wakes, so
+  a laptop that was asleep still refreshes on next start.
+- **uv on PATH.** systemd `--user` services start with a minimal PATH. The
+  `Environment=PATH=...` line prepends `~/.local/bin` so the script's `uv run`
+  shebang resolves (uv's default install location). Adjust if uv lives elsewhere.
+- **Script location.** `ExecStart` expects an executable script at
+  `~/bin/farside_btc.py`. Copy it there (with `chmod +x`) or edit `ExecStart`.
+
+Install:
+
+```bash
+mkdir -p ~/bin ~/.config/systemd/user
+cp farside_btc.py ~/bin/ && chmod +x ~/bin/farside_btc.py
+cp deploy/systemd/btc-flows.{service,timer} ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now btc-flows.timer
+
+# verify
+systemctl --user list-timers btc-flows.timer
+journalctl --user -u btc-flows.service -n 20
+```
+
+> On a headless box, enable lingering so `--user` timers run without an active
+> login session: `loginctl enable-linger "$USER"`.
+
+### cron equivalent
 
 ```cron
-# 7:00 AM local, weekdays
-0 7 * * 1-5  /path/to/farside_btc.py >> ~/btc_flows.log 2>&1
+CRON_TZ=UTC
+30 22,23 * * *  $HOME/bin/farside_btc.py >> $HOME/.openclaw/cache/refresh.log 2>&1
+30 1    * * *   $HOME/bin/farside_btc.py >> $HOME/.openclaw/cache/refresh.log 2>&1
 ```
 
 ---

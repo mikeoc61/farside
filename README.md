@@ -31,7 +31,23 @@ graceful stale-fallback when the upstream fetch fails.
 
 ### Option A — uv (recommended)
 
-No install step. The script declares its own dependencies inline.
+Requires [uv](https://docs.astral.sh/uv/) to be installed (one-time):
+
+```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh
+```
+
+The script declares its own Python dependencies inline ([PEP 723](https://peps.python.org/pep-0723/)),
+so there's nothing else to install — uv resolves them into an ephemeral
+environment on first run. The shebang (`#!/usr/bin/env -S uv run --script`)
+routes execution through uv, so you can run the file directly:
+
+```bash
+chmod +x farside_btc.py   # once, if the exec bit was lost
+./farside_btc.py
+```
+
+…or invoke uv explicitly (no exec bit needed):
 
 ```bash
 uv run farside_btc.py

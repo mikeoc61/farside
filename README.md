@@ -1,4 +1,4 @@
-# farside-btc
+# farside_btc
 
 Command-line fetcher for U.S. spot **Bitcoin ETF net flows**, scraped from
 [Farside Investors](https://farside.co.uk/btc/). Emits a terminal briefing by

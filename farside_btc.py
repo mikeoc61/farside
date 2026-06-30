@@ -3,6 +3,31 @@
 # requires-python = ">=3.11"
 # dependencies = ["curl_cffi", "beautifulsoup4", "requests"]
 # ///
+"""Fetch and summarize U.S. spot Bitcoin ETF net flows from Farside Investors.
+
+Scrapes the daily flow table at https://farside.co.uk/btc/, parses the per-ETF
+net flows (US$ millions), and derives a few summary metrics: a rolling N-day
+net, an inflow/outflow streak, and an IBIT-share "conviction vs. breadth" tag.
+
+Design notes
+------------
+* Fetch uses ``curl_cffi`` with Chrome TLS impersonation to pass the site's
+  bot-mitigation fingerprint checks, falling back to a warmed ``requests``
+  session if ``curl_cffi`` is unavailable.
+* Parsing is schema-tolerant: the flow table is located by detecting date rows
+  and columns are mapped by header name (IBIT/FBTC/ARKB/GBTC/Total) rather than
+  fixed index, so upstream column reordering won't silently corrupt output.
+* The last good payload is cached to ``~/.openclaw/cache/farside_btc.json``; on
+  any fetch/parse failure the cached payload is returned flagged ``stale``.
+
+CLI
+---
+    farside_btc.py            # human-readable briefing block
+    farside_btc.py --json     # full structured payload as JSON
+
+All monetary values are in US$ millions; negative denotes net outflow.
+"""
+
 import json
 import re
 import sys
@@ -33,6 +58,19 @@ WANT = ("IBIT", "FBTC", "ARKB", "GBTC", "Total")
 
 
 def parse_flow(s):
+    """Parse a single flow cell into a float (US$ millions).
+
+    Handles the table's formatting quirks: thousands separators, en-dashes used
+    as minus signs, blank/``-`` cells (treated as 0.0), and accounting-style
+    parentheses for negatives, e.g. ``"(444.5)"`` -> ``-444.5``.
+
+    Args:
+        s: Raw cell text.
+
+    Returns:
+        The parsed value, ``0.0`` for empty/placeholder cells, or ``None`` if
+        the text is non-numeric and cannot be parsed.
+    """
     s = s.strip().replace(",", "").replace("\u2013", "-")
     if s in ("", "-"):
         return 0.0
@@ -46,6 +84,24 @@ def parse_flow(s):
 
 
 def fetch_html(url=URL, timeout=20):
+    """Fetch the raw HTML of the flow page.
+
+    Prefers ``curl_cffi`` with ``impersonate="chrome"`` so the TLS/JA3
+    fingerprint matches a real browser and passes the site's bot mitigation.
+    If ``curl_cffi`` is not installed, falls back to a ``requests`` session that
+    first warms the site root to pick up cookies before requesting ``url``.
+
+    Args:
+        url: Page to fetch. Defaults to the BTC flow table URL.
+        timeout: Per-request timeout in seconds.
+
+    Returns:
+        The response body as text.
+
+    Raises:
+        Exception: Propagates any network/HTTP error (e.g. ``raise_for_status``)
+            so the caller can fall back to cache.
+    """
     try:
         from curl_cffi import requests as creq
     except ImportError:
@@ -64,6 +120,26 @@ def fetch_html(url=URL, timeout=20):
 
 
 def parse_table(html):
+    """Extract daily per-ETF flows from the page HTML.
+
+    Scans every ``<table>`` and selects the first one that looks like the flow
+    table: it must contain rows whose first cell matches ``D MMM YYYY`` and a
+    header region mapping at least the ``IBIT`` and ``Total`` columns. Columns
+    are resolved by header name (see ``WANT``) rather than position, so the
+    parser tolerates added/reordered columns.
+
+    Args:
+        html: Raw page HTML.
+
+    Returns:
+        A list of per-day dicts in document order, each shaped as
+        ``{"date": "26 Jun 2026", "IBIT": -444.5, ..., "Total": -444.5}``.
+        Missing cells for a wanted column are ``None``.
+
+    Raises:
+        ValueError: If no table matching the expected schema is found (e.g. the
+            site layout changed).
+    """
     from bs4 import BeautifulSoup
 
     soup = BeautifulSoup(html, "html.parser")
@@ -102,6 +178,10 @@ def parse_table(html):
 
 
 def _age_days(date_str):
+    """Return whole days elapsed (UTC) since ``date_str`` (``"D MMM YYYY"``).
+
+    Returns ``None`` if the date string cannot be parsed.
+    """
     try:
         d = datetime.strptime(date_str, "%d %b %Y").date()
         return (datetime.now(timezone.utc).date() - d).days
@@ -110,6 +190,11 @@ def _age_days(date_str):
 
 
 def _reported(data):
+    """Filter to days that actually have flow data.
+
+    Drops trailing placeholder rows the site lists before numbers are published
+    (every wanted column ``None``/``0.0``), so summaries reflect real activity.
+    """
     return [
         r for r in data
         if any(r.get(k) not in (None, 0.0) for k in WANT)
@@ -117,6 +202,21 @@ def _reported(data):
 
 
 def summarize(data, window=5):
+    """Compute summary metrics over the parsed daily rows.
+
+    Args:
+        data: Per-day rows as returned by :func:`parse_table` (document order).
+        window: Number of most-recent reported days for the rolling net.
+
+    Returns:
+        A dict with: ``as_of`` (latest reported date), ``age_days``,
+        ``pending_today`` (newest row exists but has no flows yet),
+        ``latest_total``/``latest_ibit``, ``window`` and the windowed
+        ``window_total``/``window_ibit`` nets, plus ``streak_days`` and
+        ``streak_sign`` (``inflow``/``outflow``/``flat``) for the run of
+        consecutive same-sign Total days. Fields are ``None``/zero when no day
+        has reported data yet.
+    """
     reported = _reported(data)
     pending = bool(data) and bool(reported) and data[-1] is not reported[-1]
     if not reported:
@@ -168,6 +268,7 @@ def summarize(data, window=5):
 
 
 def load_cache():
+    """Load the last cached payload, or ``None`` if missing/unreadable."""
     try:
         return json.loads(CACHE.read_text())
     except Exception:
@@ -175,11 +276,25 @@ def load_cache():
 
 
 def save_cache(payload):
+    """Write ``payload`` to the cache file as pretty JSON, creating dirs."""
     CACHE.parent.mkdir(parents=True, exist_ok=True)
     CACHE.write_text(json.dumps(payload, indent=2))
 
 
 def get_flows(window=5):
+    """Fetch, parse, summarize, and cache the latest flows.
+
+    On success, builds a payload (``fetched_at``, ``stale=False``, ``summary``,
+    the last ``window`` reported ``rows``, and a one-line ``line``), writes it to
+    cache, and returns it. On any failure, returns the cached payload with
+    ``stale=True`` and an ``error`` field; re-raises only if no cache exists.
+
+    Args:
+        window: Rolling window length passed to :func:`summarize`.
+
+    Returns:
+        The flow payload dict (fresh or stale-from-cache).
+    """
     try:
         data = parse_table(fetch_html())
         payload = {
@@ -201,12 +316,26 @@ def get_flows(window=5):
 
 
 def _fmt(v):
+    """Format a value (US$m) with an explicit sign, e.g. ``+57.7``/``-444.5``.
+
+    Returns ``"n/a"`` for ``None``.
+    """
     if v is None:
         return "n/a"
     return f"+{v:.1f}" if v >= 0 else f"{v:.1f}"
 
 
 def briefing_block(payload):
+    """Render the default multi-line terminal briefing for a payload.
+
+    Includes latest-day and rolling-window totals plus the streak, with inline
+    flags appended when relevant: ``FETCH-FAILED`` (stale cache),
+    ``TODAY-PENDING`` (newest day unreported), and ``DATA-Nd-OLD`` (latest data
+    older than 4 days).
+
+    Returns:
+        A formatted multi-line string.
+    """
     s = payload["summary"]
     flags = []
     if payload.get("stale"):
@@ -225,6 +354,11 @@ def briefing_block(payload):
 
 
 def _abbr(v):
+    """Abbreviate a US$m value for the compact one-liner.
+
+    Scales magnitudes >= 1000 to billions with a sign (``-1.72B``); otherwise
+    shows signed millions (``-444.5M``). Returns ``"n/a"`` for ``None``.
+    """
     if v is None:
         return "n/a"
     if abs(v) >= 1000:
@@ -233,6 +367,17 @@ def _abbr(v):
 
 
 def briefing_line(payload):
+    """Render the compact single-line summary stored as ``payload["line"]``.
+
+    Combines latest total, windowed net, IBIT net and its share of the window,
+    and the streak, then tags the regime by direction and IBIT concentration:
+    ``conviction accumulation``/``distribution`` when IBIT is >= 60% of the
+    same-signed window net, otherwise ``broad inflow``/``outflow`` (or
+    ``mixed flows`` when flat). Appends ``today pending``/``data stale`` notes.
+
+    Returns:
+        A one-line summary string.
+    """
     s = payload["summary"]
     if s["as_of"] is None:
         return "ETF Flows: n/a"

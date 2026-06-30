@@ -85,6 +85,23 @@ python3 farside_btc.py
 
 Requires Python ≥ 3.11.
 
+### Run it as a command (optional)
+
+Symlink the script onto your PATH so you can invoke it as `farside_btc` from
+anywhere (this is also the path the systemd unit's `ExecStart` resolves). Run
+from the repo root:
+
+```bash
+chmod +x farside_btc.py
+mkdir -p ~/.local/bin
+ln -sf "$PWD/farside_btc.py" ~/.local/bin/farside_btc
+farside_btc
+```
+
+The symlink is extensionless on purpose — the `uv run --script` shebang treats
+the target as a script regardless of name. Ensure `~/.local/bin` is on your
+`PATH` (it is by default on most modern distros).
+
 ---
 
 ## Usage

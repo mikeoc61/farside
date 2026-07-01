@@ -246,8 +246,8 @@ WantedBy=timers.target
 
 Notes:
 
-- **Timing.** `OnCalendar` fires at 22:30, 23:30, and 01:30 UTC — three
-  early-evening-to-night (U.S. Eastern) attempts to capture the finalized
+- **Timing.** `OnCalendar` fires at 23:30, 1:30, and 02:30 UTC — three
+  evening-to-night (U.S. Eastern) attempts to capture the finalized
   prior-day flows and survive a late publish or a transient fetch failure. Each
   run overwrites the cache.
 - **`Persistent=true`** re-runs a missed timer after the machine boots/wakes, so
@@ -286,8 +286,8 @@ journalctl --user -u btc-flows.service -n 20
 
 ```cron
 CRON_TZ=UTC
-30 22,23 * * *  $HOME/.local/bin/farside_btc >> $HOME/.openclaw/cache/refresh.log 2>&1
-30 1    * * *   $HOME/.local/bin/farside_btc >> $HOME/.openclaw/cache/refresh.log 2>&1
+30 23 * * *  $HOME/.local/bin/farside_btc >> $HOME/.openclaw/cache/refresh.log 2>&1
+30 1,2 * * *   $HOME/.local/bin/farside_btc >> $HOME/.openclaw/cache/refresh.log 2>&1
 ```
 
 ---

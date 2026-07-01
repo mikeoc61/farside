@@ -2,7 +2,7 @@
 Description=Schedule Farside flow refresh
 
 [Timer]
-OnCalendar=*-*-* 22,23,01:30:00 UTC
+OnCalendar=*-*-* 23,01,02:30:00 UTC
 Persistent=true
 
 [Install]

@@ -1,4 +1,4 @@
-# farside_btc
+# farside_flows
 
 Command-line fetcher for U.S. spot **crypto ETF net flows** (Bitcoin, Ethereum,
 and Solana), scraped from [Farside Investors](https://farside.co.uk/). Emits a
@@ -70,36 +70,36 @@ environment on first run. The shebang (`#!/usr/bin/env -S uv run --script`)
 routes execution through uv, so you can run the file directly:
 
 ```bash
-chmod +x farside_btc.py   # once, if the exec bit was lost
-./farside_btc.py
+chmod +x farside_flows.py   # once, if the exec bit was lost
+./farside_flows.py
 ```
 
 …or invoke uv explicitly (no exec bit needed):
 
 ```bash
-uv run farside_btc.py
+uv run farside_flows.py
 ```
 
 ### Option B — pip
 
 ```bash
 pip install -r requirements.txt
-python3 farside_btc.py
+python3 farside_flows.py
 ```
 
 Requires Python ≥ 3.11.
 
 ### Run it as a command (optional)
 
-Symlink the script onto your PATH so you can invoke it as `farside_btc` from
+Symlink the script onto your PATH so you can invoke it as `farside_flows` from
 anywhere (this is also the path the systemd unit's `ExecStart` resolves). Run
 from the repo root:
 
 ```bash
-chmod +x farside_btc.py
+chmod +x farside_flows.py
 mkdir -p ~/.local/bin
-ln -sf "$PWD/farside_btc.py" ~/.local/bin/farside_btc
-farside_btc
+ln -sf "$PWD/farside_flows.py" ~/.local/bin/farside_flows
+farside_flows
 ```
 
 The symlink is extensionless on purpose — the `uv run --script` shebang treats
@@ -112,15 +112,15 @@ the target as a script regardless of name. Ensure `~/.local/bin` is on your
 
 ```bash
 # Human-readable briefing block (BTC by default)
-./farside_btc.py
+./farside_flows.py
 
 # Pick an asset: btc (default), eth, or sol
-./farside_btc.py eth
-./farside_btc.py sol
+./farside_flows.py eth
+./farside_flows.py sol
 
 # Full structured detail
-./farside_btc.py --json
-./farside_btc.py eth --json
+./farside_flows.py --json
+./farside_flows.py eth --json
 ```
 
 ### Example — default output
@@ -204,7 +204,7 @@ whether the lead fund accounts for ≥60% of the same-signed window total.
 1. **Fetch** (`fetch_html`) — `curl_cffi` Chrome impersonation; falls back to a
    `requests.Session` that first warms `farside.co.uk/` to pick up cookies.
 2. **Parse** (`parse_table`) — finds the first table whose rows start with a
-   `D MMM YYYY` date, builds a header→column-index map, and reads per-ETF flows.
+   `D MMM YYYY` date, builds a header→column-index map, and reads per-fund flows.
 3. **Summarize** (`summarize`) — computes window nets, streak, and age over the
    *reported* rows. `_reported()` discards the current-day row until Farside
    publishes its numbers (surfaced as `pending_today`), so `as_of` is always the
@@ -234,26 +234,26 @@ refreshes the cache each evening (after U.S. ETF flows finalize), so a morning
 consumer reads complete prior-day data. Ready-to-use units are in
 [`deploy/systemd/`](deploy/systemd/).
 
-`btc-flows.service`:
+`farside-flows.service`:
 
 ```ini
 [Unit]
-Description=Refresh Farside BTC ETF flow cache
+Description=Refresh Farside ETF flow cache
 
 [Service]
 Type=oneshot
 Environment=PATH=%h/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-ExecStart=%h/.local/bin/farside_btc
+ExecStart=%h/.local/bin/farside_flows
 ```
 
-`btc-flows.timer`:
+`farside-flows.timer`:
 
 ```ini
 [Unit]
 Description=Schedule Farside flow refresh
 
 [Timer]
-OnCalendar=*-*-* 22,23,01:30:00 UTC
+OnCalendar=*-*-* 23,01,02:30:00 UTC
 Persistent=true
 
 [Install]
@@ -271,28 +271,28 @@ Notes:
 - **uv on PATH.** systemd `--user` services start with a minimal PATH. The
   `Environment=PATH=...` line prepends `~/.local/bin` so the script's `uv run`
   shebang resolves (uv's default install location). Adjust if uv lives elsewhere.
-- **Script location.** `ExecStart` runs `~/.local/bin/farside_btc`, a symlink to
+- **Script location.** `ExecStart` runs `~/.local/bin/farside_flows`, a symlink to
   the repo file (see Install). The symlink gives a stable path independent of
   where the repo lives, and — since `~/.local/bin` is on PATH — also lets you run
-  `farside_btc` as a bare command. The extension is dropped intentionally; the
+  `farside_flows` as a bare command. The extension is dropped intentionally; the
   `uv run --script` shebang treats the target as a script regardless of name.
 
 Install:
 
 ```bash
 # from the repo root: make the script executable and symlink it onto PATH
-chmod +x farside_btc.py
+chmod +x farside_flows.py
 mkdir -p ~/.local/bin ~/.config/systemd/user
-ln -sf "$PWD/farside_btc.py" ~/.local/bin/farside_btc
+ln -sf "$PWD/farside_flows.py" ~/.local/bin/farside_flows
 
 # install and start the timer
-cp deploy/systemd/btc-flows.{service,timer} ~/.config/systemd/user/
+cp deploy/systemd/farside-flows.{service,timer} ~/.config/systemd/user/
 systemctl --user daemon-reload
-systemctl --user enable --now btc-flows.timer
+systemctl --user enable --now farside-flows.timer
 
 # verify
-systemctl --user list-timers btc-flows.timer
-journalctl --user -u btc-flows.service -n 20
+systemctl --user list-timers farside-flows.timer
+journalctl --user -u farside-flows.service -n 20
 ```
 
 > On a headless box, enable lingering so `--user` timers run without an active
@@ -300,10 +300,11 @@ journalctl --user -u btc-flows.service -n 20
 
 ### Refreshing additional assets
 
-The bundled units refresh BTC. To also warm the ETH and/or SOL caches, pass the
-asset to the same script. Either duplicate the unit pair with the asset in
-`ExecStart` (e.g. `ExecStart=%h/.local/bin/farside_btc eth`), or use a single
-systemd template so one unit pair serves every asset (`%i` is the instance name):
+The bundled `farside-flows.timer` refreshes BTC only. To cover ETH and SOL too,
+either duplicate the unit pair with the asset in `ExecStart` (e.g.
+`ExecStart=%h/.local/bin/farside_flows eth`), or — cleaner — replace the single
+unit with a systemd template so one pair serves every asset (`%i` is the
+instance name):
 
 ```ini
 # ~/.config/systemd/user/farside-flows@.service
@@ -313,7 +314,7 @@ Description=Refresh Farside %i ETF flow cache
 [Service]
 Type=oneshot
 Environment=PATH=%h/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-ExecStart=%h/.local/bin/farside_btc %i
+ExecStart=%h/.local/bin/farside_flows %i
 ```
 
 ```ini
@@ -334,12 +335,15 @@ systemctl --user daemon-reload
 systemctl --user enable --now farside-flows@btc.timer farside-flows@eth.timer farside-flows@sol.timer
 ```
 
+If you enable the template's `@btc` instance, disable the bundled
+`farside-flows.timer` so BTC isn't refreshed twice.
+
 ### cron equivalent
 
 ```cron
 CRON_TZ=UTC
-30 23 * * *  $HOME/.local/bin/farside_btc >> $HOME/.openclaw/cache/refresh.log 2>&1
-30 1,2 * * *   $HOME/.local/bin/farside_btc >> $HOME/.openclaw/cache/refresh.log 2>&1
+30 23 * * *  $HOME/.local/bin/farside_flows >> $HOME/.openclaw/cache/refresh.log 2>&1
+30 1,2 * * *   $HOME/.local/bin/farside_flows >> $HOME/.openclaw/cache/refresh.log 2>&1
 ```
 
 ---

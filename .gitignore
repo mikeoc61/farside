@@ -25,3 +25,6 @@ env/
 # Env / secrets
 .env
 *.local
+
+# FUSE artifact from renaming an open file on this mount
+.fuse_hidden*

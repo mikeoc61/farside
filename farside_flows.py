@@ -27,9 +27,9 @@ Assets (lead fund)
 
 CLI
 ---
-    farside_btc.py             # BTC briefing block (default asset)
-    farside_btc.py eth         # Ethereum briefing block
-    farside_btc.py sol --json  # Solana, full payload as JSON
+    farside_flows.py             # BTC briefing block (default asset)
+    farside_flows.py eth         # Ethereum briefing block
+    farside_flows.py sol --json  # Solana, full payload as JSON
 
 All monetary values are in US$ millions; negative denotes net outflow.
 """

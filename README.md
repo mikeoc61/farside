@@ -1,8 +1,9 @@
 # farside_btc
 
-Command-line fetcher for U.S. spot **Bitcoin ETF net flows**, scraped from
-[Farside Investors](https://farside.co.uk/btc/). Emits a terminal briefing by
-default, or structured JSON for piping into other tools.
+Command-line fetcher for U.S. spot **crypto ETF net flows** (Bitcoin, Ethereum,
+and Solana), scraped from [Farside Investors](https://farside.co.uk/). Emits a
+terminal briefing by default, or structured JSON for piping into other tools.
+BTC is the default; select an asset with a positional argument.
 
 It handles the parts that make scraping Farside annoying: TLS/JA3 fingerprinting
 (via Chrome impersonation), schema-tolerant table parsing, on-disk caching, and
@@ -39,14 +40,17 @@ a JSON file and isn't openclaw-specific.
   dependencies — run it directly with `uv` and nothing to install.
 - **Bot-mitigation aware.** Uses `curl_cffi` with `impersonate="chrome"` to pass
   TLS fingerprint checks; falls back to a warmed `requests` session.
+- **Multiple assets.** Fetches the Bitcoin, Ethereum, or Solana flow table via a
+  positional argument (`btc` default); each asset has its own flagship ("lead")
+  fund and cache file.
 - **Schema-tolerant parser.** Locates the flow table by detecting date rows and
-  maps columns by header name (`IBIT`, `FBTC`, `ARKB`, `GBTC`, `Total`) rather
-  than fixed positions, so column reordering won't silently break it.
+  maps columns by header name (per-asset tickers + `Total`) rather than fixed
+  positions, so column reordering won't silently break it.
 - **Derived metrics.** Rolling N-day net flow, inflow/outflow streak length, and
-  an IBIT-share "conviction vs. breadth" classifier.
-- **Caching + stale-fallback.** Caches the last good payload to
-  `~/.openclaw/cache/farside_btc.json`; on fetch failure it returns the cached
-  payload flagged `stale` instead of crashing.
+  a lead-fund-share "conviction vs. breadth" classifier.
+- **Caching + stale-fallback.** Caches the last good payload per asset to
+  `~/.openclaw/cache/farside_<asset>.json`; on fetch failure it returns the
+  cached payload flagged `stale` instead of crashing.
 
 ---
 
@@ -107,11 +111,16 @@ the target as a script regardless of name. Ensure `~/.local/bin` is on your
 ## Usage
 
 ```bash
-# Human-readable briefing block
+# Human-readable briefing block (BTC by default)
 ./farside_btc.py
+
+# Pick an asset: btc (default), eth, or sol
+./farside_btc.py eth
+./farside_btc.py sol
 
 # Full structured detail
 ./farside_btc.py --json
+./farside_btc.py eth --json
 ```
 
 ### Example — default output
@@ -130,21 +139,26 @@ BTC ETF flows (Farside, as of 26 Jun 2026):
   "fetched_at": "2026-06-29T00:00:00+00:00",
   "stale": false,
   "summary": {
+    "asset": "btc",
+    "lead": "IBIT",
     "as_of": "26 Jun 2026",
     "age_days": 3,
     "pending_today": false,
     "latest_total": -444.5,
-    "latest_ibit": -444.5,
+    "latest_lead": -444.5,
     "window": 5,
     "window_total": -1719.0,
-    "window_ibit": -1131.5,
+    "window_lead": -1131.5,
     "streak_days": 3,
     "streak_sign": "outflow"
   },
-  "rows": [ /* last `window` reported days, per-ETF */ ],
-  "line": "ETF Flows: -444.5M (26 Jun) | 5d -1.72B | IBIT -1.13B (66%) | 3d outflow — conviction distribution"
+  "rows": [ /* last `window` reported days, per-fund */ ],
+  "line": "BTC ETF Flows: -444.5M (26 Jun) | 5d -1.72B | IBIT -1.13B (66%) | 3d outflow — conviction distribution"
 }
 ```
+
+For `eth`/`sol` the shape is identical; `asset`/`lead` and the `rows` tickers
+change (e.g. `"asset": "eth"`, `"lead": "ETHA"`).
 
 All flow values are in **US$ millions**. Negative = net outflow.
 
@@ -160,26 +174,28 @@ All flow values are in **US$ millions**. Negative = net outflow.
 | `stale`       | bool            | `true` if served from cache after a fetch failure           |
 | `error`       | string          | Present only when `stale` — the underlying exception         |
 | `summary`     | object          | Derived metrics (see below)                                  |
-| `rows`        | array           | Last `window` reported days, each with per-ETF flows         |
+| `rows`        | array           | Last `window` reported days, each with per-fund flows        |
 | `line`        | string          | One-line briefing with conviction/breadth tag                |
 
 `summary` fields:
 
 | Field           | Notes                                                              |
 | --------------- | ----------------------------------------------------------------- |
+| `asset`         | `btc` \| `eth` \| `sol`                                           |
+| `lead`          | Flagship fund ticker for the asset (`IBIT` / `ETHA` / `BSOL`)     |
 | `as_of`         | Date of the latest *reported* day                                 |
 | `age_days`      | Days since `as_of` (UTC)                                           |
 | `pending_today` | `true` if the newest row exists but has no flows reported yet     |
 | `latest_total`  | Most recent day's total net flow (US$m)                           |
-| `latest_ibit`   | Most recent day's IBIT net flow (US$m)                            |
+| `latest_lead`   | Most recent day's lead-fund net flow (US$m)                       |
 | `window`        | Rolling window length (default 5)                                 |
 | `window_total`  | Net total flow over the window                                    |
-| `window_ibit`   | Net IBIT flow over the window                                     |
+| `window_lead`   | Net lead-fund flow over the window                                |
 | `streak_days`   | Consecutive same-sign total-flow days                             |
 | `streak_sign`   | `inflow` \| `outflow` \| `flat`                                   |
 
 The `line` classifier tags window flow as *conviction* vs *broad* based on
-whether IBIT accounts for ≥60% of the same-signed window total.
+whether the lead fund accounts for ≥60% of the same-signed window total.
 
 ---
 
@@ -200,14 +216,14 @@ whether IBIT accounts for ≥60% of the same-signed window total.
 
 ## Caching
 
-Last good payload is written to:
+Each asset's last good payload is written to its own file:
 
 ```
-~/.openclaw/cache/farside_btc.json
+~/.openclaw/cache/farside_<asset>.json   # e.g. farside_btc.json, farside_eth.json
 ```
 
-Delete it to force a clean state. The cache is what backs stale-fallback when
-Farside is unreachable or changes its layout.
+Delete a file to force a clean state for that asset. The cache is what backs
+stale-fallback when Farside is unreachable or changes its layout.
 
 ---
 
@@ -281,6 +297,42 @@ journalctl --user -u btc-flows.service -n 20
 
 > On a headless box, enable lingering so `--user` timers run without an active
 > login session: `loginctl enable-linger "$USER"`.
+
+### Refreshing additional assets
+
+The bundled units refresh BTC. To also warm the ETH and/or SOL caches, pass the
+asset to the same script. Either duplicate the unit pair with the asset in
+`ExecStart` (e.g. `ExecStart=%h/.local/bin/farside_btc eth`), or use a single
+systemd template so one unit pair serves every asset (`%i` is the instance name):
+
+```ini
+# ~/.config/systemd/user/farside-flows@.service
+[Unit]
+Description=Refresh Farside %i ETF flow cache
+
+[Service]
+Type=oneshot
+Environment=PATH=%h/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ExecStart=%h/.local/bin/farside_btc %i
+```
+
+```ini
+# ~/.config/systemd/user/farside-flows@.timer
+[Unit]
+Description=Schedule Farside %i flow refresh
+
+[Timer]
+OnCalendar=*-*-* 23,01,02:30:00 UTC
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+```
+
+```bash
+systemctl --user daemon-reload
+systemctl --user enable --now farside-flows@btc.timer farside-flows@eth.timer farside-flows@sol.timer
+```
 
 ### cron equivalent
 

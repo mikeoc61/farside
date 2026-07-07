@@ -253,7 +253,7 @@ ExecStart=%h/.local/bin/farside_flows
 Description=Schedule Farside flow refresh
 
 [Timer]
-OnCalendar=*-*-* 23,01,02:30:00 UTC
+OnCalendar=*-*-* 03,04,05:30:00 UTC
 Persistent=true
 
 [Install]

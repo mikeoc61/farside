@@ -280,9 +280,12 @@ def summarize(data, cfg, window=5):
         row exists but has no flows yet), ``partial_pending`` (newest reported
         day has some but not all tracked funds in), ``partial`` (summary of that
         in-progress day, else ``None``), ``latest_total``/``latest_lead``,
-        ``window`` and the windowed ``window_total``/``window_lead`` nets, plus
-        ``streak_days`` and ``streak_sign`` (``inflow``/``outflow``/``flat``)
-        for the run of consecutive same-sign Total days. All
+        ``window``, ``window_dates`` (the exact fully-reported days the window
+        nets cover — note these can differ from the ``rows`` payload, which
+        lists the most recent *reported* days incl. any partial one) and the
+        windowed ``window_total``/``window_lead`` nets, plus ``streak_days`` and
+        ``streak_sign`` (``inflow``/``outflow``/``flat``) for the run of
+        consecutive same-sign Total days. All
         latest/streak/window metrics are computed over fully-reported days only
         (every tracked fund posted); they are ``None``/zero when no such day
         exists yet.
@@ -315,6 +318,7 @@ def summarize(data, cfg, window=5):
             "latest_total": None,
             "latest_lead": None,
             "window": window,
+            "window_dates": [],
             "window_total": 0.0,
             "window_lead": 0.0,
             "streak_days": 0,
@@ -347,6 +351,7 @@ def summarize(data, cfg, window=5):
         "latest_total": latest["Total"],
         "latest_lead": latest[lead],
         "window": window,
+        "window_dates": [r["date"] for r in recent],
         "window_total": round(total_w, 1),
         "window_lead": round(lead_w, 1),
         "streak_days": streak,

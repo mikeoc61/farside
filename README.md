@@ -156,6 +156,7 @@ BTC ETF flows (Farside, as of 26 Jun 2026):
     "latest_total": -444.5,
     "latest_lead": -444.5,
     "window": 5,
+    "window_dates": [ "20 Jun 2026", "23 Jun 2026", "24 Jun 2026", "25 Jun 2026", "26 Jun 2026" ],
     "window_total": -1719.0,
     "window_lead": -1131.5,
     "streak_days": 3,
@@ -200,6 +201,7 @@ All flow values are in **US$ millions**. Negative = net outflow.
 | `latest_total`  | Most recent *fully-reported* day's total net flow (US$m)          |
 | `latest_lead`   | Most recent *fully-reported* day's lead-fund net flow (US$m)      |
 | `window`        | Rolling window length (default 5)                                 |
+| `window_dates`  | The fully-reported days the window nets cover (may differ from `rows`, which lists the most recent *reported* days incl. any partial one) |
 | `window_total`  | Net total flow over the window                                    |
 | `window_lead`   | Net lead-fund flow over the window                                |
 | `streak_days`   | Consecutive same-sign total-flow days                             |

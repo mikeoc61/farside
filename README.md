@@ -25,9 +25,11 @@ agent**. The deployment model:
 
 The cache is a **resilience layer, not a no-fetch read path**: a direct
 invocation always tries the live URL first and uses the cache solely as a
-fallback. The script also never returns partial current-day data — flows aren't
-final until after the close, so the current day is excluded until Farside
-publishes it (see [How it works](#how-it-works)).
+fallback. The script also never folds partial data into its metrics — a day is
+treated as final only once **every tracked fund** has reported. Farside posts
+funds progressively through the day, so any day with an outstanding fund is
+excluded from all latest/streak/window figures and surfaced separately as
+`partial` (see [How it works](#how-it-works)).
 
 The cache path (`~/.openclaw/cache/`) reflects that original consumer; it's just
 a JSON file and isn't openclaw-specific.
@@ -46,8 +48,13 @@ a JSON file and isn't openclaw-specific.
 - **Schema-tolerant parser.** Locates the flow table by detecting date rows and
   maps columns by header name (per-asset tickers + `Total`) rather than fixed
   positions, so column reordering won't silently break it.
+- **Reported-zero vs. not-reported.** Distinguishes a fund's genuine `0.0` flow
+  from a not-yet-published cell (Farside renders the latter as `-`), so a
+  pending fund is never silently counted as a zero. A day counts as final only
+  once every tracked fund has reported; partial days are excluded from metrics
+  and exposed via `partial`/`partial_pending`.
 - **Derived metrics.** Rolling N-day net flow, inflow/outflow streak length, and
-  a lead-fund-share "conviction vs. breadth" classifier.
+  a lead-fund-share classifier (*conviction* / *broad* / *offsetting*).
 - **Caching + stale-fallback.** Caches the last good payload per asset to
   `~/.openclaw/cache/farside_<asset>.json`; on fetch failure it returns the
   cached payload flagged `stale` instead of crashing.
@@ -144,6 +151,8 @@ BTC ETF flows (Farside, as of 26 Jun 2026):
     "as_of": "26 Jun 2026",
     "age_days": 3,
     "pending_today": false,
+    "partial_pending": false,
+    "partial": null,
     "latest_total": -444.5,
     "latest_lead": -444.5,
     "window": 5,
@@ -183,19 +192,32 @@ All flow values are in **US$ millions**. Negative = net outflow.
 | --------------- | ----------------------------------------------------------------- |
 | `asset`         | `btc` \| `eth` \| `sol`                                           |
 | `lead`          | Flagship fund ticker for the asset (`IBIT` / `ETHA` / `BSOL`)     |
-| `as_of`         | Date of the latest *reported* day                                 |
+| `as_of`         | Date of the latest *fully-reported* day (all tracked funds in)     |
 | `age_days`      | Days since `as_of` (UTC)                                           |
 | `pending_today` | `true` if the newest row exists but has no flows reported yet     |
-| `latest_total`  | Most recent day's total net flow (US$m)                           |
-| `latest_lead`   | Most recent day's lead-fund net flow (US$m)                       |
+| `partial_pending` | `true` if the newest reported day has some but not all tracked funds in |
+| `partial`       | Object for that in-progress day, else `null` (see below)          |
+| `latest_total`  | Most recent *fully-reported* day's total net flow (US$m)          |
+| `latest_lead`   | Most recent *fully-reported* day's lead-fund net flow (US$m)      |
 | `window`        | Rolling window length (default 5)                                 |
 | `window_total`  | Net total flow over the window                                    |
 | `window_lead`   | Net lead-fund flow over the window                                |
 | `streak_days`   | Consecutive same-sign total-flow days                             |
 | `streak_sign`   | `inflow` \| `outflow` \| `flat`                                   |
 
-The `line` classifier tags window flow as *conviction* vs *broad* based on
-whether the lead fund accounts for ≥60% of the same-signed window total.
+When present, `partial` describes the in-progress latest day:
+
+| Field            | Notes                                                            |
+| ---------------- | --------------------------------------------------------------- |
+| `date`           | The partial day's date                                          |
+| `reported_total` | Net flow of the funds that have reported so far (US$m)          |
+| `reported`       | Tickers that have posted                                        |
+| `pending`        | Tickers still outstanding                                       |
+
+The `line` classifier tags the same-signed window flow by the lead fund's
+share: *conviction* when the lead is 60–120% of the window total, *offsetting*
+when it exceeds 120% (other funds net-offset it, leaving a small residual), and
+*broad* below 60%.
 
 ---
 
@@ -203,12 +225,18 @@ whether the lead fund accounts for ≥60% of the same-signed window total.
 
 1. **Fetch** (`fetch_html`) — `curl_cffi` Chrome impersonation; falls back to a
    `requests.Session` that first warms `farside.co.uk/` to pick up cookies.
-2. **Parse** (`parse_table`) — finds the first table whose rows start with a
-   `D MMM YYYY` date, builds a header→column-index map, and reads per-fund flows.
-3. **Summarize** (`summarize`) — computes window nets, streak, and age over the
-   *reported* rows. `_reported()` discards the current-day row until Farside
-   publishes its numbers (surfaced as `pending_today`), so `as_of` is always the
-   latest **finalized** day and running mid-session never yields partial data.
+2. **Parse** (`parse_table` / `parse_flow`) — finds the first table whose rows
+   start with a `D MMM YYYY` date, builds a header→column-index map, and reads
+   per-fund flows. A genuine `0.0` flow is kept as `0.0`; a not-yet-published
+   cell (Farside renders it as `-` or blank) becomes `None`, so a pending fund
+   is never coerced into a zero.
+3. **Summarize** (`summarize`) — computes window nets, streak, and age over
+   *fully-reported* days only (`complete` = every tracked fund non-`None`). A
+   day with all funds still blank is dropped by `_reported()` and flagged
+   `pending_today`; a day with some funds in but others outstanding is excluded
+   from the metrics and flagged `partial_pending`, with its known state exposed
+   in `partial`. So `as_of` is always the latest **finalized** day and running
+   mid-session never folds partial data into the totals.
 4. **Cache** (`save_cache` / `load_cache`) — writes the payload; on any fetch or
    parse error, `get_flows` returns the last cached payload flagged `stale`.
 

@@ -90,19 +90,24 @@ def parse_flow(s):
     """Parse a single flow cell into a float (US$ millions).
 
     Handles the table's formatting quirks: thousands separators, en-dashes used
-    as minus signs, blank/``-`` cells (treated as 0.0), and accounting-style
-    parentheses for negatives, e.g. ``"(444.5)"`` -> ``-444.5``.
+    as minus signs, and accounting-style parentheses for negatives, e.g.
+    ``"(444.5)"`` -> ``-444.5``.
+
+    Farside distinguishes a *reported zero* flow (rendered ``"0.0"``) from a
+    *not-yet-reported* cell (rendered blank or ``"-"``). We preserve that
+    distinction: blank/``-`` cells return ``None`` (missing) rather than being
+    coerced to ``0.0``, so a pending fund is never silently counted as a zero.
 
     Args:
         s: Raw cell text.
 
     Returns:
-        The parsed value, ``0.0`` for empty/placeholder cells, or ``None`` if
-        the text is non-numeric and cannot be parsed.
+        The parsed value, ``None`` for blank/``-`` (not reported) or
+        non-numeric cells, and ``0.0`` only for an explicit ``"0"``/``"0.0"``.
     """
     s = s.strip().replace(",", "").replace("\u2013", "-")
     if s in ("", "-"):
-        return 0.0
+        return None
     neg = s.startswith("(") and s.endswith(")")
     s = s.strip("()")
     try:
@@ -237,6 +242,30 @@ def _reported(data, want):
     ]
 
 
+def _partial(row, funds):
+    """Summarize a partially-reported latest day (not all funds posted yet).
+
+    Farside posts funds (and a provisional ``Total``) progressively through the
+    day; while any tracked fund is still blank the day's ``Total`` is
+    incomplete and its direction is indeterminate. This captures what is known —
+    the net of the funds that have reported — and which funds are outstanding.
+
+    Args:
+        row: The most-recent reported row.
+        funds: The tracked fund tickers for the asset (``cfg["funds"]``).
+
+    Returns:
+        ``{"date", "reported_total", "reported": [...], "pending": [...]}``.
+    """
+    have = [k for k in funds if row.get(k) is not None]
+    return {
+        "date": row["date"],
+        "reported_total": round(sum(row[k] for k in have), 1),
+        "reported": have,
+        "pending": [k for k in funds if row.get(k) is None],
+    }
+
+
 def summarize(data, cfg, window=5):
     """Compute summary metrics over the parsed daily rows.
 
@@ -247,24 +276,42 @@ def summarize(data, cfg, window=5):
 
     Returns:
         A dict with: ``asset`` and ``lead`` (the flagship ticker), ``as_of``
-        (latest reported date), ``age_days``, ``pending_today`` (newest row
-        exists but has no flows yet), ``latest_total``/``latest_lead``,
+        (latest *fully-reported* date), ``age_days``, ``pending_today`` (newest
+        row exists but has no flows yet), ``partial_pending`` (newest reported
+        day has some but not all tracked funds in), ``partial`` (summary of that
+        in-progress day, else ``None``), ``latest_total``/``latest_lead``,
         ``window`` and the windowed ``window_total``/``window_lead`` nets, plus
-        ``streak_days`` and ``streak_sign`` (``inflow``/``outflow``/``flat``) for
-        the run of consecutive same-sign Total days. Metric fields are
-        ``None``/zero when no day has reported data yet.
+        ``streak_days`` and ``streak_sign`` (``inflow``/``outflow``/``flat``)
+        for the run of consecutive same-sign Total days. All
+        latest/streak/window metrics are computed over fully-reported days only
+        (every tracked fund posted); they are ``None``/zero when no such day
+        exists yet.
     """
     lead = cfg["lead"]
+    funds = cfg["funds"]
     want = want_cols(cfg)
     reported = _reported(data, want)
     pending = bool(data) and bool(reported) and data[-1] is not reported[-1]
+    # A day can be partially reported: funds (and a provisional Total) post
+    # progressively, so a day's Total and direction are indeterminate until
+    # every tracked fund is in. Gate day-completeness on all tracked funds
+    # having reported, and compute every latest/streak/window/direction metric
+    # over fully-reported days only. The in-progress day, if any, is surfaced
+    # separately via ``partial``.
+    complete = [r for r in reported if all(r.get(k) is not None for k in funds)]
+    partial_pending = bool(reported) and any(
+        reported[-1].get(k) is None for k in funds
+    )
+    partial = _partial(reported[-1], funds) if partial_pending else None
     base = {"asset": cfg["asset"], "lead": lead}
-    if not reported:
+    if not complete:
         return {
             **base,
             "as_of": None,
             "age_days": None,
             "pending_today": pending,
+            "partial_pending": partial_pending,
+            "partial": partial,
             "latest_total": None,
             "latest_lead": None,
             "window": window,
@@ -273,13 +320,13 @@ def summarize(data, cfg, window=5):
             "streak_days": 0,
             "streak_sign": "flat",
         }
-    recent = reported[-window:]
-    latest = reported[-1]
+    recent = complete[-window:]
+    latest = complete[-1]
     total_w = sum(r["Total"] for r in recent if r["Total"] is not None)
     lead_w = sum(r[lead] for r in recent if r[lead] is not None)
     sign = None
     streak = 0
-    for r in reversed(reported):
+    for r in reversed(complete):
         v = r["Total"]
         if v is None:
             break
@@ -295,6 +342,8 @@ def summarize(data, cfg, window=5):
         "as_of": latest["date"],
         "age_days": _age_days(latest["date"]),
         "pending_today": pending,
+        "partial_pending": partial_pending,
+        "partial": partial,
         "latest_total": latest["Total"],
         "latest_lead": latest[lead],
         "window": window,
@@ -387,8 +436,9 @@ def briefing_block(payload):
 
     Includes latest-day and rolling-window totals plus the streak, with inline
     flags appended when relevant: ``FETCH-FAILED`` (stale cache),
-    ``TODAY-PENDING`` (newest day unreported), and ``DATA-Nd-OLD`` (latest data
-    older than 4 days).
+    ``TODAY-PENDING`` (newest day unreported), ``PARTIAL:<funds>`` (newest day
+    reported but some tracked funds still outstanding), and ``DATA-Nd-OLD``
+    (latest data older than 4 days).
 
     Returns:
         A formatted multi-line string.
@@ -399,6 +449,8 @@ def briefing_block(payload):
         flags.append("FETCH-FAILED")
     if s.get("pending_today"):
         flags.append("TODAY-PENDING")
+    if s.get("partial_pending") and s.get("partial"):
+        flags.append("PARTIAL:" + "/".join(s["partial"]["pending"]))
     if s.get("age_days") is not None and s["age_days"] > 4:
         flags.append(f"DATA-{s['age_days']}D-OLD")
     tag = f" [{', '.join(flags)}]" if flags else ""
@@ -430,9 +482,10 @@ def briefing_line(payload):
     Combines latest total, windowed net, the lead fund's net and its share of the
     window, and the streak, then tags the regime by direction and lead-fund
     concentration: ``conviction accumulation``/``distribution`` when the lead
-    fund is >= 60% of the same-signed window net, otherwise
-    ``broad inflow``/``outflow`` (or ``mixed flows`` when flat). Appends
-    ``today pending``/``data stale`` notes.
+    fund is 60-120% of the same-signed window net, ``offsetting flows`` when the
+    lead exceeds 120% (other funds net-offset it, leaving a small residual),
+    otherwise ``broad inflow``/``outflow`` (or ``mixed flows`` when flat).
+    Appends ``today pending``/``{lead} pending``/``data stale`` notes.
 
     Returns:
         A one-line summary string.
@@ -446,12 +499,17 @@ def briefing_line(payload):
     if wt and wl is not None and (wt > 0) == (wl > 0):
         share_val = round(100 * wl / wt)
         share_txt = f" ({share_val}%)"
-    if wt < 0:
-        tag = "conviction distribution" if share_val and share_val >= 60 else "broad outflow"
-    elif wt > 0:
-        tag = "conviction accumulation" if share_val and share_val >= 60 else "broad inflow"
-    else:
+    direction = "outflow" if wt < 0 else "inflow" if wt > 0 else None
+    if direction is None:
         tag = "mixed flows"
+    elif share_val and share_val > 120:
+        # Lead's net exceeds the window net by >20%: the other funds are
+        # net-offsetting it, so the small residual is not a "conviction" signal.
+        tag = f"offsetting flows (net {direction})"
+    elif share_val and share_val >= 60:
+        tag = "conviction distribution" if wt < 0 else "conviction accumulation"
+    else:
+        tag = f"broad {direction}"
     asof_short = " ".join(s["as_of"].split()[:2])
     line = (
         f"{s['asset'].upper()} ETF Flows: {_abbr(s['latest_total'])} ({asof_short}) | "
@@ -461,6 +519,13 @@ def briefing_line(payload):
     notes = []
     if s.get("pending_today"):
         notes.append("today pending")
+    if s.get("partial_pending") and s.get("partial"):
+        p = s["partial"]
+        notes.append(
+            f"{'/'.join(p['pending'])} pending "
+            f"({' '.join(p['date'].split()[:2])}: "
+            f"reported {_abbr(p['reported_total'])})"
+        )
     if payload.get("stale"):
         notes.append("data stale")
     if notes:

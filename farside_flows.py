@@ -517,8 +517,9 @@ def briefing_line(payload):
         tag = f"broad {direction}"
     asof_short = " ".join(s["as_of"].split()[:2])
     line = (
-        f"{s['asset'].upper()} ETF Flows: {_abbr(s['latest_total'])} ({asof_short}) | "
-        f"{s['window']}d {_abbr(wt)} | {lead} {_abbr(wl)}{share_txt} | "
+        f"{s['asset'].upper()} ETF Flows: {_abbr(s['latest_total'])} ({asof_short}, "
+        f"{lead} {_abbr(s['latest_lead'])}) | "
+        f"{s['window']}d net {_abbr(wt)} | {lead} 5d {_abbr(wl)}{share_txt} | "
         f"{s['streak_days']}d {s['streak_sign']} — {tag}"
     )
     notes = []

@@ -569,10 +569,17 @@ def briefing_line(payload):
         notes.append("today pending")
     if s.get("partial_pending") and s.get("partial"):
         p = s["partial"]
+        lbl = "/".join(p["pending"])
+        # Everything posted so far = the day's Total excluding the pending
+        # fund(s): reported_total (tracked) + other (untracked). Report that,
+        # not the tracked-only slice, so the figure matches the row Total.
+        posted = (
+            p["reported_total"] if p["other"] is None
+            else round(p["reported_total"] + p["other"], 1)
+        )
         notes.append(
-            f"{'/'.join(p['pending'])} pending "
-            f"({' '.join(p['date'].split()[:2])}: "
-            f"reported {_abbr(p['reported_total'])})"
+            f"{lbl} pending "
+            f"({' '.join(p['date'].split()[:2])}: {_abbr(posted)} ex-{lbl})"
         )
     if payload.get("stale"):
         notes.append("data stale")

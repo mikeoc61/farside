@@ -162,7 +162,7 @@ BTC ETF flows (Farside, as of 26 Jun 2026):
     "streak_days": 3,
     "streak_sign": "outflow"
   },
-  "rows": [ /* last `window` reported days, per-fund */ ],
+  "rows": [ /* last `window` reported days; per-fund + `Other` + `Total` */ ],
   "line": "BTC ETF Flows: -444.5M (26 Jun) | 5d -1.72B | IBIT -1.13B (66%) | 3d outflow — conviction distribution"
 }
 ```
@@ -184,7 +184,7 @@ All flow values are in **US$ millions**. Negative = net outflow.
 | `stale`       | bool            | `true` if served from cache after a fetch failure           |
 | `error`       | string          | Present only when `stale` — the underlying exception         |
 | `summary`     | object          | Derived metrics (see below)                                  |
-| `rows`        | array           | Last `window` reported days, each with per-fund flows        |
+| `rows`        | array           | Last `window` reported days; each has the tracked funds, `Other`, and `Total` (see below) |
 | `line`        | string          | One-line briefing with conviction/breadth tag                |
 
 `summary` fields:
@@ -212,9 +212,18 @@ When present, `partial` describes the in-progress latest day:
 | Field            | Notes                                                            |
 | ---------------- | --------------------------------------------------------------- |
 | `date`           | The partial day's date                                          |
-| `reported_total` | Net flow of the funds that have reported so far (US$m)          |
-| `reported`       | Tickers that have posted                                        |
-| `pending`        | Tickers still outstanding                                       |
+| `reported_total` | Net flow of the *tracked* funds that have reported so far (US$m) |
+| `other`          | Net of the untracked funds in `Total` (see `Other` below); `reported_total + other == Total` |
+| `reported`       | Tracked tickers that have posted                                |
+| `pending`        | Tracked tickers still outstanding                              |
+
+**Tracked funds vs. `Total`.** Farside's `Total` column sums *every* listed
+ETF, but each asset itemizes only a curated subset (the flagship + a few majors).
+Each `rows` entry therefore carries an **`Other`** field — `Total` minus the
+tracked funds present — capturing the aggregate of the untracked funds, so that
+`sum(tracked present) + Other == Total` for every row. Do **not** infer a pending
+fund's value from `Total − reported_total`; that residual is `other` (untracked
+flow), not the outstanding fund.
 
 The `line` classifier tags the same-signed window flow by the lead fund's
 share: *conviction* when the lead is 60–120% of the window total, *offsetting*

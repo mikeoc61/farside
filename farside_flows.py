@@ -242,25 +242,64 @@ def _reported(data, want):
     ]
 
 
+def _other(row, funds):
+    """Net flow of funds inside Farside's ``Total`` that we don't itemize.
+
+    Farside's ``Total`` column sums *every* listed ETF, but each asset tracks
+    only a curated subset (``cfg["funds"]``). ``Other`` is the residual —
+    ``Total`` minus the tracked funds present in the row — i.e. the aggregate
+    of the untracked funds. By construction ``sum(tracked present) + Other ==
+    Total`` for the row, so the per-fund breakdown reconciles to ``Total``.
+
+    Returns ``None`` if the row has no ``Total``.
+    """
+    total = row.get("Total")
+    if total is None:
+        return None
+    tracked = sum(row[k] for k in funds if row.get(k) is not None)
+    return round(total - tracked, 1)
+
+
+def _with_other(row, funds):
+    """Return an ordered copy of ``row`` with a derived ``Other`` field.
+
+    ``Other`` (see :func:`_other`) is inserted just before ``Total`` so the
+    emitted row reads funds → Other → Total and satisfies
+    ``sum(tracked present) + Other == Total``.
+    """
+    out = {"date": row["date"]}
+    for k in funds:
+        out[k] = row.get(k)
+    out["Other"] = _other(row, funds)
+    out["Total"] = row.get("Total")
+    return out
+
+
 def _partial(row, funds):
     """Summarize a partially-reported latest day (not all funds posted yet).
 
     Farside posts funds (and a provisional ``Total``) progressively through the
     day; while any tracked fund is still blank the day's ``Total`` is
     incomplete and its direction is indeterminate. This captures what is known —
-    the net of the funds that have reported — and which funds are outstanding.
+    the net of the tracked funds that have reported (``reported_total``), the
+    untracked residual (``other``; see :func:`_other`), and which tracked funds
+    are outstanding. Note ``reported_total + other == Total`` for the day, so
+    the pending value is *only* the flagship's — untracked flow is not mistaken
+    for it.
 
     Args:
         row: The most-recent reported row.
         funds: The tracked fund tickers for the asset (``cfg["funds"]``).
 
     Returns:
-        ``{"date", "reported_total", "reported": [...], "pending": [...]}``.
+        ``{"date", "reported_total", "other", "reported": [...],
+        "pending": [...]}``.
     """
     have = [k for k in funds if row.get(k) is not None]
     return {
         "date": row["date"],
         "reported_total": round(sum(row[k] for k in have), 1),
+        "other": _other(row, funds),
         "reported": have,
         "pending": [k for k in funds if row.get(k) is None],
     }
@@ -412,7 +451,10 @@ def get_flows(asset=DEFAULT_ASSET, window=5):
             "fetched_at": datetime.now(timezone.utc).isoformat(),
             "stale": False,
             "summary": summarize(data, cfg, window),
-            "rows": _reported(data, want)[-window:],
+            "rows": [
+                _with_other(r, cfg["funds"])
+                for r in _reported(data, want)[-window:]
+            ],
         }
         payload["line"] = briefing_line(payload)
         save_cache(payload, cache)

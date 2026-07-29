@@ -7,14 +7,18 @@
 
 Supports the Bitcoin, Ethereum, and Solana flow tables (``btc`` is the default).
 Scrapes the daily per-fund net flows (US$ millions) for the chosen asset and
-derives a few summary metrics: a rolling N-day net, an inflow/outflow streak,
-and a "conviction vs. breadth" tag based on the flagship ("lead") fund's share.
+derives a few summary metrics: rolling 5/20/60-day nets, an inflow/outflow
+streak, and a "conviction vs. breadth" tag based on the flagship ("lead")
+fund's share.
 
 Design notes
 ------------
 * Fetch uses ``curl_cffi`` with Chrome TLS impersonation to pass the site's
   bot-mitigation fingerprint checks, falling back to a warmed ``requests``
   session if ``curl_cffi`` is unavailable.
+* History comes from each asset's "all data" page where one exists; the shorter
+  nav page (~3 weeks) is the fallback. Windows longer than the available history
+  report as uncovered rather than quietly netting fewer days.
 * Parsing is schema-tolerant: the flow table is located by detecting date rows
   and columns are mapped by header name (per-asset tickers + ``Total``) rather
   than fixed index, so upstream column reordering won't silently corrupt output.
@@ -40,26 +44,44 @@ import re
 from datetime import datetime, timezone
 from pathlib import Path
 
-# Per-asset config: page URL, flagship ("lead") fund used for the share/streak
-# metrics, and the curated set of funds tracked in each row (lead listed first).
+# Per-asset config: the nav page URL, an optional full-history ("all data") page,
+# the flagship ("lead") fund used for the share/streak metrics, and the curated
+# set of funds tracked in each row (lead listed first).
+#
+# The nav pages (``url``) only publish a rolling ~3-week window — roughly 13
+# fully-reported days — which covers the 5-day net but not the longer ones.
+# Farside also publishes a full-history table per asset at ``all_data`` (BTC back
+# to Jan 2024, ETH to Jul 2024); those pages use the identical table schema, so
+# the same parser handles both. Solana has no all-data page, so ``sol`` is capped
+# at whatever the nav page carries and its long windows report as uncovered.
 ASSETS = {
     "btc": {
         "url": "https://farside.co.uk/btc/",
+        "all_data": "https://farside.co.uk/bitcoin-etf-flow-all-data/",
         "lead": "IBIT",
         "funds": ("IBIT", "FBTC", "ARKB", "GBTC"),
     },
     "eth": {
         "url": "https://farside.co.uk/eth/",
+        "all_data": "https://farside.co.uk/ethereum-etf-flow-all-data/",
         "lead": "ETHA",
         "funds": ("ETHA", "FETH", "ETHW", "ETHE"),
     },
     "sol": {
         "url": "https://farside.co.uk/sol/",
+        "all_data": None,
         "lead": "BSOL",
         "funds": ("BSOL", "FSOL", "VSOL", "GSOL"),
     },
 }
 DEFAULT_ASSET = "btc"
+# Rolling windows (in fully-reported days) reported by :func:`summarize`. The
+# first is the *primary* window: it drives the flat ``window_*`` summary keys and
+# the one-liner's share/regime classification.
+DEFAULT_WINDOWS = (5, 20, 60)
+# Reported days included in the payload's ``rows`` — independent of the windows,
+# so asking for a 60-day net doesn't dump 60 rows into the cache.
+DEFAULT_ROWS = 5
 CACHE_DIR = Path.home() / ".openclaw" / "cache"
 HEADERS = {
     "User-Agent": (
@@ -151,6 +173,38 @@ def fetch_html(url, timeout=20):
     r = sess.get(url, timeout=timeout)
     r.raise_for_status()
     return r.text
+
+
+def fetch_table(cfg, timeout=20):
+    """Fetch and parse an asset's flow table, preferring full history.
+
+    Tries the asset's ``all_data`` page first (hundreds of days, needed for the
+    longer windows) and falls back to the shorter nav page (``url``) if it is
+    absent, 404s, or fails to parse. Assets with no all-data page (``sol``) go
+    straight to the nav page.
+
+    Args:
+        cfg: Asset config (``url``/``all_data``/``lead``/``funds``/``asset``).
+        timeout: Per-request timeout in seconds.
+
+    Returns:
+        ``(rows, source_url)`` — the parsed per-day rows and the page they came
+        from, so the payload can record which table was actually used.
+
+    Raises:
+        ValueError: If every candidate page failed; the message lists each
+            page's error so a site change is diagnosable from the cached
+            payload's ``error`` field.
+    """
+    errors = []
+    for url in (cfg.get("all_data"), cfg["url"]):
+        if not url:
+            continue
+        try:
+            return parse_table(fetch_html(url, timeout), cfg), url
+        except Exception as e:
+            errors.append(f"{url}: {e}")
+    raise ValueError("; ".join(errors) or "no source URL configured")
 
 
 def parse_table(html, cfg):
@@ -305,13 +359,61 @@ def _partial(row, funds):
     }
 
 
-def summarize(data, cfg, window=5):
+def _windows(windows):
+    """Normalize the ``windows`` argument to a tuple of ints.
+
+    Accepts a bare int (legacy single-window callers) or any iterable of ints.
+    """
+    if isinstance(windows, int):
+        return (windows,)
+    return tuple(windows)
+
+
+def _window_net(complete, lead, days):
+    """Net flows over the most recent ``days`` fully-reported rows.
+
+    Because the nets are only meaningful when the full span is present, this
+    reports coverage explicitly rather than silently returning a shorter
+    window's net under a longer window's label: ``covered`` is ``False`` and
+    ``total``/``lead`` are ``None`` when fewer than ``days`` complete days exist
+    (the case for ``sol``, and for any asset in its first weeks of trading).
+    ``days_available`` always reports how many days actually backed the slice.
+
+    Args:
+        complete: Fully-reported rows in document order (oldest first).
+        lead: The asset's flagship ticker.
+        days: Requested window length.
+
+    Returns:
+        ``{"days", "days_available", "covered", "total", "lead", "dates"}``.
+    """
+    recent = complete[-days:] if days > 0 else []
+    covered = len(recent) == days
+    return {
+        "days": days,
+        "days_available": len(recent),
+        "covered": covered,
+        "total": (
+            round(sum(r["Total"] for r in recent if r["Total"] is not None), 1)
+            if covered else None
+        ),
+        "lead": (
+            round(sum(r[lead] for r in recent if r[lead] is not None), 1)
+            if covered else None
+        ),
+        "dates": [r["date"] for r in recent],
+    }
+
+
+def summarize(data, cfg, windows=DEFAULT_WINDOWS):
     """Compute summary metrics over the parsed daily rows.
 
     Args:
         data: Per-day rows as returned by :func:`parse_table` (document order).
         cfg: Asset config (provides ``asset`` and the ``lead`` fund).
-        window: Number of most-recent reported days for the rolling net.
+        windows: Rolling window lengths in fully-reported days. A bare int is
+            accepted for a single window. The first entry is the *primary*
+            window and populates the flat ``window_*`` keys.
 
     Returns:
         A dict with: ``asset`` and ``lead`` (the flagship ticker), ``as_of``
@@ -319,16 +421,24 @@ def summarize(data, cfg, window=5):
         row exists but has no flows yet), ``partial_pending`` (newest reported
         day has some but not all tracked funds in), ``partial`` (summary of that
         in-progress day, else ``None``), ``latest_total``/``latest_lead``,
-        ``window``, ``window_dates`` (the exact fully-reported days the window
-        nets cover — note these can differ from the ``rows`` payload, which
-        lists the most recent *reported* days incl. any partial one) and the
-        windowed ``window_total``/``window_lead`` nets, plus ``streak_days`` and
-        ``streak_sign`` (``inflow``/``outflow``/``flat``) for the run of
-        consecutive same-sign Total days. All
-        latest/streak/window metrics are computed over fully-reported days only
-        (every tracked fund posted); they are ``None``/zero when no such day
-        exists yet.
+        ``days_complete`` (how many fully-reported days the source supplied, the
+        ceiling on window coverage), and ``windows`` — a list of per-window nets
+        (see :func:`_window_net`), each carrying its own ``dates`` and a
+        ``covered`` flag that is ``False`` when the source has too little
+        history to fill it.
+
+        For compatibility the primary window is also mirrored onto the flat
+        ``window``/``window_dates``/``window_total``/``window_lead`` keys; note
+        ``window_dates`` can differ from the ``rows`` payload, which lists the
+        most recent *reported* days incl. any partial one.
+
+        Also ``streak_days`` and ``streak_sign``
+        (``inflow``/``outflow``/``flat``) for the run of consecutive same-sign
+        Total days. All latest/streak/window metrics are computed over
+        fully-reported days only (every tracked fund posted); they are
+        ``None``/zero when no such day exists yet.
     """
+    windows = _windows(windows)
     lead = cfg["lead"]
     funds = cfg["funds"]
     want = want_cols(cfg)
@@ -346,6 +456,14 @@ def summarize(data, cfg, window=5):
     )
     partial = _partial(reported[-1], funds) if partial_pending else None
     base = {"asset": cfg["asset"], "lead": lead}
+    nets = [_window_net(complete, lead, w) for w in windows]
+    primary = nets[0]
+    flat = {
+        "window": primary["days"],
+        "window_dates": primary["dates"],
+        "window_total": primary["total"],
+        "window_lead": primary["lead"],
+    }
     if not complete:
         return {
             **base,
@@ -356,17 +474,13 @@ def summarize(data, cfg, window=5):
             "partial": partial,
             "latest_total": None,
             "latest_lead": None,
-            "window": window,
-            "window_dates": [],
-            "window_total": 0.0,
-            "window_lead": 0.0,
+            "days_complete": 0,
+            "windows": nets,
+            **flat,
             "streak_days": 0,
             "streak_sign": "flat",
         }
-    recent = complete[-window:]
     latest = complete[-1]
-    total_w = sum(r["Total"] for r in recent if r["Total"] is not None)
-    lead_w = sum(r[lead] for r in recent if r[lead] is not None)
     sign = None
     streak = 0
     for r in reversed(complete):
@@ -389,10 +503,9 @@ def summarize(data, cfg, window=5):
         "partial": partial,
         "latest_total": latest["Total"],
         "latest_lead": latest[lead],
-        "window": window,
-        "window_dates": [r["date"] for r in recent],
-        "window_total": round(total_w, 1),
-        "window_lead": round(lead_w, 1),
+        "days_complete": len(complete),
+        "windows": nets,
+        **flat,
         "streak_days": streak,
         "streak_sign": (
             "inflow" if sign and sign > 0
@@ -426,18 +539,21 @@ def save_cache(payload, path):
     path.write_text(json.dumps(payload, indent=2))
 
 
-def get_flows(asset=DEFAULT_ASSET, window=5):
+def get_flows(asset=DEFAULT_ASSET, windows=DEFAULT_WINDOWS, rows=DEFAULT_ROWS):
     """Fetch, parse, summarize, and cache the latest flows for one asset.
 
-    On success, builds a payload (``fetched_at``, ``stale=False``, ``summary``,
-    the last ``window`` reported ``rows``, and a one-line ``line``), writes it to
-    the asset's cache, and returns it. On any failure, returns that asset's
-    cached payload with ``stale=True`` and an ``error`` field; re-raises only if
-    no cache exists.
+    On success, builds a payload (``fetched_at``, ``source`` — the page the
+    table came from, ``stale=False``, ``summary``, the last ``rows`` reported
+    ``rows``, and a one-line ``line``), writes it to the asset's cache, and
+    returns it. On any failure, returns that asset's cached payload with
+    ``stale=True`` and an ``error`` field; re-raises only if no cache exists.
 
     Args:
         asset: Which asset to fetch (``btc``/``eth``/``sol``).
-        window: Rolling window length passed to :func:`summarize`.
+        windows: Rolling window lengths passed to :func:`summarize`.
+        rows: How many recent reported days to include in the ``rows`` payload.
+            Deliberately independent of ``windows`` so a 60-day net doesn't drag
+            60 rows into the cache.
 
     Returns:
         The flow payload dict (fresh or stale-from-cache).
@@ -446,14 +562,15 @@ def get_flows(asset=DEFAULT_ASSET, window=5):
     cache = cache_path(asset)
     want = want_cols(cfg)
     try:
-        data = parse_table(fetch_html(cfg["url"]), cfg)
+        data, source = fetch_table(cfg)
         payload = {
             "fetched_at": datetime.now(timezone.utc).isoformat(),
+            "source": source,
             "stale": False,
-            "summary": summarize(data, cfg, window),
+            "summary": summarize(data, cfg, windows),
             "rows": [
                 _with_other(r, cfg["funds"])
-                for r in _reported(data, want)[-window:]
+                for r in _reported(data, want)[-rows:]
             ],
         }
         payload["line"] = briefing_line(payload)
@@ -478,14 +595,41 @@ def _fmt(v):
     return f"+{v:.1f}" if v >= 0 else f"{v:.1f}"
 
 
+def _summary_windows(s):
+    """Per-window nets for a summary, tolerating older cached payloads.
+
+    Payloads cached before multi-window support carry only the flat ``window_*``
+    keys; synthesize the single-entry list from those so a stale cache still
+    renders instead of raising.
+    """
+    nets = s.get("windows")
+    if nets:
+        return nets
+    days = s.get("window")
+    if days is None:
+        return []
+    dates = s.get("window_dates") or []
+    return [{
+        "days": days,
+        "days_available": len(dates),
+        "covered": True,
+        "total": s.get("window_total"),
+        "lead": s.get("window_lead"),
+        "dates": dates,
+    }]
+
+
 def briefing_block(payload):
     """Render the default multi-line terminal briefing for a payload.
 
-    Includes latest-day and rolling-window totals plus the streak, with inline
-    flags appended when relevant: ``FETCH-FAILED`` (stale cache),
+    Includes the latest day, one line per rolling window, and the streak, with
+    inline flags appended when relevant: ``FETCH-FAILED`` (stale cache),
     ``TODAY-PENDING`` (newest day unreported), ``PARTIAL:<funds>`` (newest day
     reported but some tracked funds still outstanding), and ``DATA-Nd-OLD``
     (latest data older than 4 days).
+
+    A window the source can't fill renders as ``n/a (Nd available)`` rather than
+    a shorter net under a longer label.
 
     Returns:
         A formatted multi-line string.
@@ -502,12 +646,20 @@ def briefing_block(payload):
         flags.append(f"DATA-{s['age_days']}D-OLD")
     tag = f" [{', '.join(flags)}]" if flags else ""
     lead = s["lead"]
-    return "\n".join([
+    lines = [
         f"{s['asset'].upper()} ETF flows (Farside, as of {s['as_of']}){tag}:",
         f"  latest: {_fmt(s['latest_total'])}m total | {_fmt(s['latest_lead'])}m {lead}",
-        f"  {s['window']}d net: {_fmt(s['window_total'])}m total | {_fmt(s['window_lead'])}m {lead}",
-        f"  streak: {s['streak_days']}d {s['streak_sign']}",
-    ])
+    ]
+    for w in _summary_windows(s):
+        label = f"  {w['days']}d net:"
+        if w["covered"]:
+            lines.append(
+                f"{label} {_fmt(w['total'])}m total | {_fmt(w['lead'])}m {lead}"
+            )
+        else:
+            lines.append(f"{label} n/a ({w['days_available']}d available)")
+    lines.append(f"  streak: {s['streak_days']}d {s['streak_sign']}")
+    return "\n".join(lines)
 
 
 def _abbr(v):
@@ -526,12 +678,14 @@ def _abbr(v):
 def briefing_line(payload):
     """Render the compact single-line summary stored as ``payload["line"]``.
 
-    Combines latest total, windowed net, the lead fund's net and its share of the
-    window, and the streak, then tags the regime by direction and lead-fund
-    concentration: ``conviction accumulation``/``distribution`` when the lead
-    fund is 60-120% of the same-signed window net, ``offsetting flows`` when the
-    lead exceeds 120% (other funds net-offset it, leaving a small residual),
-    otherwise ``broad inflow``/``outflow`` (or ``mixed flows`` when flat).
+    Combines latest total, the primary window's net, the lead fund's net and its
+    share of that window, any longer windows' nets, and the streak, then tags the
+    regime by direction and lead-fund concentration: ``conviction
+    accumulation``/``distribution`` when the lead fund is 60-120% of the
+    same-signed primary net, ``offsetting flows`` when the lead exceeds 120%
+    (other funds net-offset it, leaving a small residual), otherwise ``broad
+    inflow``/``outflow`` (or ``mixed flows`` when flat). Only the primary window
+    drives the classification; the longer windows are reported as context.
     Appends ``today pending``/``{lead} pending``/``data stale`` notes.
 
     Returns:
@@ -541,13 +695,21 @@ def briefing_line(payload):
     if s["as_of"] is None:
         return f"{s['asset'].upper()} ETF Flows: n/a"
     lead = s["lead"]
-    wt, wl = s["window_total"], s["window_lead"]
+    nets = _summary_windows(s)
+    primary = nets[0] if nets else None
+    wt, wl = (primary["total"], primary["lead"]) if primary else (None, None)
     share_txt, share_val = "", None
     if wt and wl is not None and (wt > 0) == (wl > 0):
         share_val = round(100 * wl / wt)
         share_txt = f" ({share_val}%)"
-    direction = "outflow" if wt < 0 else "inflow" if wt > 0 else None
-    if direction is None:
+    direction = None if wt is None else (
+        "outflow" if wt < 0 else "inflow" if wt > 0 else None
+    )
+    if wt is None:
+        # Primary window isn't covered by the available history, so there is no
+        # net to classify — say so rather than implying a flat/mixed regime.
+        tag = "insufficient history"
+    elif direction is None:
         tag = "mixed flows"
     elif share_val and share_val > 120:
         # Lead's net exceeds the window net by >20%: the other funds are
@@ -558,10 +720,15 @@ def briefing_line(payload):
     else:
         tag = f"broad {direction}"
     asof_short = " ".join(s["as_of"].split()[:2])
+    pd = primary["days"] if primary else None
+    extra = "".join(
+        f" | {w['days']}d {_abbr(w['total']) if w['covered'] else 'n/a'}"
+        for w in nets[1:]
+    )
     line = (
         f"{s['asset'].upper()} ETF Flows: {_abbr(s['latest_total'])} ({asof_short}, "
         f"{lead} {_abbr(s['latest_lead'])}) | "
-        f"{s['window']}d net {_abbr(wt)} | {lead} 5d {_abbr(wl)}{share_txt} | "
+        f"{pd}d net {_abbr(wt)} | {lead} {pd}d {_abbr(wl)}{share_txt}{extra} | "
         f"{s['streak_days']}d {s['streak_sign']} — {tag}"
     )
     notes = []

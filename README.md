@@ -53,8 +53,14 @@ a JSON file and isn't openclaw-specific.
   pending fund is never silently counted as a zero. A day counts as final only
   once every tracked fund has reported; partial days are excluded from metrics
   and exposed via `partial`/`partial_pending`.
-- **Derived metrics.** Rolling N-day net flow, inflow/outflow streak length, and
-  a lead-fund-share classifier (*conviction* / *broad* / *offsetting*).
+- **Derived metrics.** Rolling 5/20/60-day net flows, inflow/outflow streak
+  length, and a lead-fund-share classifier (*conviction* / *broad* /
+  *offsetting*).
+- **Full history, honestly bounded.** Pulls each asset's "all data" page (BTC
+  back to Jan 2024, ETH to Jul 2024) so the long windows have real history, and
+  falls back to the shorter nav page if it's unavailable. A window the source
+  can't fill reports as `n/a` with the day count available, never a shorter net
+  under a longer label.
 - **Caching + stale-fallback.** Caches the last good payload per asset to
   `~/.openclaw/cache/farside_<asset>.json`; on fetch failure it returns the
   cached payload flagged `stale` instead of crashing.
@@ -136,7 +142,21 @@ the target as a script regardless of name. Ensure `~/.local/bin` is on your
 BTC ETF flows (Farside, as of 26 Jun 2026):
   latest: -444.5m total | -444.5m IBIT
   5d net: -1719.0m total | -1131.5m IBIT
+  20d net: -49.6m total | -135.3m IBIT
+  60d net: -6742.7m total | -4886.9m IBIT
   streak: 3d outflow
+```
+
+Solana has no full-history page upstream, so its long windows stay `n/a` until
+enough trading days accumulate on the nav page:
+
+```
+SOL ETF flows (Farside, as of 26 Jun 2026):
+  latest: -18.1m total | -18.1m BSOL
+  5d net: -10.0m total | -8.7m BSOL
+  20d net: n/a (9d available)
+  60d net: n/a (9d available)
+  streak: 1d outflow
 ```
 
 ### Example — `--json`
@@ -144,6 +164,7 @@ BTC ETF flows (Farside, as of 26 Jun 2026):
 ```json
 {
   "fetched_at": "2026-06-29T00:00:00+00:00",
+  "source": "https://farside.co.uk/bitcoin-etf-flow-all-data/",
   "stale": false,
   "summary": {
     "asset": "btc",
@@ -155,6 +176,19 @@ BTC ETF flows (Farside, as of 26 Jun 2026):
     "partial": null,
     "latest_total": -444.5,
     "latest_lead": -444.5,
+    "days_complete": 638,
+    "windows": [
+      {
+        "days": 5,
+        "days_available": 5,
+        "covered": true,
+        "total": -1719.0,
+        "lead": -1131.5,
+        "dates": [ "20 Jun 2026", "23 Jun 2026", "24 Jun 2026", "25 Jun 2026", "26 Jun 2026" ]
+      },
+      { "days": 20, "days_available": 20, "covered": true, "total": -49.6, "lead": -135.3, "dates": [ /* 20 dates */ ] },
+      { "days": 60, "days_available": 60, "covered": true, "total": -6742.7, "lead": -4886.9, "dates": [ /* 60 dates */ ] }
+    ],
     "window": 5,
     "window_dates": [ "20 Jun 2026", "23 Jun 2026", "24 Jun 2026", "25 Jun 2026", "26 Jun 2026" ],
     "window_total": -1719.0,
@@ -162,8 +196,8 @@ BTC ETF flows (Farside, as of 26 Jun 2026):
     "streak_days": 3,
     "streak_sign": "outflow"
   },
-  "rows": [ /* last `window` reported days; per-fund + `Other` + `Total` */ ],
-  "line": "BTC ETF Flows: -444.5M (26 Jun) | 5d -1.72B | IBIT -1.13B (66%) | 3d outflow — conviction distribution"
+  "rows": [ /* last 5 reported days; per-fund + `Other` + `Total` */ ],
+  "line": "BTC ETF Flows: -444.5M (26 Jun, IBIT -444.5M) | 5d net -1.72B | IBIT 5d -1.13B (66%) | 20d -49.6M | 60d -6.74B | 3d outflow — conviction distribution"
 }
 ```
 
@@ -181,10 +215,11 @@ All flow values are in **US$ millions**. Negative = net outflow.
 | Field         | Type            | Notes                                                        |
 | ------------- | --------------- | ------------------------------------------------------------ |
 | `fetched_at`  | ISO-8601 string | UTC time of the fetch                                        |
+| `source`      | string          | Page the table came from — the all-data page, or the nav page if it fell back |
 | `stale`       | bool            | `true` if served from cache after a fetch failure           |
 | `error`       | string          | Present only when `stale` — the underlying exception         |
 | `summary`     | object          | Derived metrics (see below)                                  |
-| `rows`        | array           | Last `window` reported days; each has the tracked funds, `Other`, and `Total` (see below) |
+| `rows`        | array           | Last 5 reported days (`DEFAULT_ROWS`, independent of the windows); each has the tracked funds, `Other`, and `Total` (see below) |
 | `line`        | string          | One-line briefing with conviction/breadth tag                |
 
 `summary` fields:
@@ -200,12 +235,33 @@ All flow values are in **US$ millions**. Negative = net outflow.
 | `partial`       | Object for that in-progress day, else `null` (see below)          |
 | `latest_total`  | Most recent *fully-reported* day's total net flow (US$m)          |
 | `latest_lead`   | Most recent *fully-reported* day's lead-fund net flow (US$m)      |
-| `window`        | Rolling window length (default 5)                                 |
-| `window_dates`  | The fully-reported days the window nets cover (may differ from `rows`, which lists the most recent *reported* days incl. any partial one) |
-| `window_total`  | Net total flow over the window                                    |
-| `window_lead`   | Net lead-fund flow over the window                                |
+| `days_complete` | How many fully-reported days the source supplied — the ceiling on window coverage |
+| `windows`       | Array of per-window nets, in requested order (see below)          |
+| `window`        | Primary (first) window's length — legacy alias                    |
+| `window_dates`  | Primary window's `dates` — legacy alias (may differ from `rows`, which lists the most recent *reported* days incl. any partial one) |
+| `window_total`  | Primary window's `total` — legacy alias                           |
+| `window_lead`   | Primary window's `lead` — legacy alias                            |
 | `streak_days`   | Consecutive same-sign total-flow days                             |
 | `streak_sign`   | `inflow` \| `outflow` \| `flat`                                   |
+
+Each `windows` entry:
+
+| Field             | Notes                                                          |
+| ----------------- | -------------------------------------------------------------- |
+| `days`            | Requested window length (5, 20, 60 by default)                 |
+| `days_available`  | Fully-reported days actually available for it                  |
+| `covered`         | `false` when `days_available < days` — the source has too little history |
+| `total`           | Net total flow over the window; `null` when `covered` is `false` |
+| `lead`            | Net lead-fund flow over the window; `null` when `covered` is `false` |
+| `dates`           | The fully-reported days the nets cover (the partial span when uncovered) |
+
+**Never read `total` without checking `covered`.** An uncovered window returns
+`null` rather than a shorter window's net wearing a longer window's label —
+consumers that ignore the flag and default `null` to `0` will misreport. Only
+the **primary** (first) window drives the `line` classifier; if it is uncovered
+the tag reads *insufficient history*. Windows are configurable via
+`summarize(data, cfg, windows=...)` / `get_flows(asset, windows=...)`; a bare
+int is still accepted for a single window.
 
 When present, `partial` describes the in-progress latest day:
 
@@ -234,20 +290,26 @@ when it exceeds 120% (other funds net-offset it, leaving a small residual), and
 
 ## How it works
 
-1. **Fetch** (`fetch_html`) — `curl_cffi` Chrome impersonation; falls back to a
-   `requests.Session` that first warms `farside.co.uk/` to pick up cookies.
+1. **Fetch** (`fetch_table` / `fetch_html`) — `fetch_table` tries the asset's
+   full-history "all data" page first and falls back to the shorter nav page if
+   it 404s or fails to parse (Solana has no all-data page, so it uses the nav
+   page directly). `fetch_html` does the transport: `curl_cffi` Chrome
+   impersonation, falling back to a `requests.Session` that first warms
+   `farside.co.uk/` to pick up cookies.
 2. **Parse** (`parse_table` / `parse_flow`) — finds the first table whose rows
    start with a `D MMM YYYY` date, builds a header→column-index map, and reads
    per-fund flows. A genuine `0.0` flow is kept as `0.0`; a not-yet-published
    cell (Farside renders it as `-` or blank) becomes `None`, so a pending fund
    is never coerced into a zero.
-3. **Summarize** (`summarize`) — computes window nets, streak, and age over
+3. **Summarize** (`summarize`) — computes each window's nets, streak, and age over
    *fully-reported* days only (`complete` = every tracked fund non-`None`). A
    day with all funds still blank is dropped by `_reported()` and flagged
    `pending_today`; a day with some funds in but others outstanding is excluded
    from the metrics and flagged `partial_pending`, with its known state exposed
    in `partial`. So `as_of` is always the latest **finalized** day and running
-   mid-session never folds partial data into the totals.
+   mid-session never folds partial data into the totals. A window with fewer
+   than `days` complete days is marked `covered: false` with `null` nets rather
+   than silently netting a shorter span.
 4. **Cache** (`save_cache` / `load_cache`) — writes the payload; on any fetch or
    parse error, `get_flows` returns the last cached payload flagged `stale`.
 

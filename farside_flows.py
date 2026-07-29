@@ -582,6 +582,21 @@ def get_flows(asset=DEFAULT_ASSET, windows=DEFAULT_WINDOWS, rows=DEFAULT_ROWS):
             raise
         cached["stale"] = True
         cached["error"] = str(e)
+        # The cached payload's derived freshness fields were frozen at write
+        # time, when the fetch had *succeeded*: ``age_days`` counted from that
+        # moment and ``line`` was rendered with ``stale=False``, so it carries no
+        # staleness note. Served as-is they would read as fresh. Recompute both
+        # now — ``as_of`` is a plain date string, so its age is exact no matter
+        # how long the cache sat unrefreshed.
+        try:
+            summary = cached.get("summary")
+            if isinstance(summary, dict) and summary.get("as_of"):
+                summary["age_days"] = _age_days(summary["as_of"])
+            cached["line"] = briefing_line(cached)
+        except Exception:
+            # Re-deriving is best-effort: returning the cached payload matters
+            # more than annotating it, so a malformed cache still gets served.
+            pass
         return cached
 
 

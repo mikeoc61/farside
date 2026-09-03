@@ -393,14 +393,14 @@ def _window_net(complete, lead, days):
         "days": days,
         "days_available": len(recent),
         "covered": covered,
-        "total": (
-            round(sum(r["Total"] for r in recent if r["Total"] is not None), 1)
-            if covered else None
-        ),
-        "lead": (
-            round(sum(r[lead] for r in recent if r[lead] is not None), 1)
-            if covered else None
-        ),
+        # No ``is not None`` filter on either sum: ``complete`` is where that
+        # invariant lives (see :func:`summarize`), and every row here has a
+        # published ``Total`` and every tracked fund in. Skipping a ``None``
+        # here would not avert a crash, it would quietly return a short sum
+        # under a full window's label -- exactly what ``covered`` exists to
+        # prevent.
+        "total": round(sum(r["Total"] for r in recent), 1) if covered else None,
+        "lead": round(sum(r[lead] for r in recent), 1) if covered else None,
         "dates": [r["date"] for r in recent],
     }
 
@@ -435,8 +435,10 @@ def summarize(data, cfg, windows=DEFAULT_WINDOWS):
         Also ``streak_days`` and ``streak_sign``
         (``inflow``/``outflow``/``flat``) for the run of consecutive same-sign
         Total days. All latest/streak/window metrics are computed over
-        fully-reported days only (every tracked fund posted); they are
-        ``None``/zero when no such day exists yet.
+        fully-reported days only (every tracked fund posted *and* a published
+        ``Total``); they are ``None``/zero when no such day exists yet. A day
+        the site never published a ``Total`` for is absent from every one of
+        them rather than counted as a zero.
     """
     windows = _windows(windows)
     lead = cfg["lead"]
@@ -450,7 +452,16 @@ def summarize(data, cfg, windows=DEFAULT_WINDOWS):
     # having reported, and compute every latest/streak/window/direction metric
     # over fully-reported days only. The in-progress day, if any, is surfaced
     # separately via ``partial``.
-    complete = [r for r in reported if all(r.get(k) is not None for k in funds)]
+    #
+    # ``Total`` is required too, and not merely because it is another column:
+    # every figure below is on Farside's ``Total`` basis, so a day the site
+    # never published one for cannot contribute to any of them. Admitting it
+    # would let a window count it toward ``covered`` while summing it as
+    # nothing -- a short sum wearing a longer window's label.
+    complete = [
+        r for r in reported
+        if r.get("Total") is not None and all(r.get(k) is not None for k in funds)
+    ]
     partial_pending = bool(reported) and any(
         reported[-1].get(k) is None for k in funds
     )
@@ -484,9 +495,10 @@ def summarize(data, cfg, windows=DEFAULT_WINDOWS):
     sign = None
     streak = 0
     for r in reversed(complete):
+        # ``complete`` guarantees a published Total, so there is no None case to
+        # break on here; a day without one is excluded upstream rather than
+        # truncating the run at the point it is met.
         v = r["Total"]
-        if v is None:
-            break
         s = 1 if v > 0 else (-1 if v < 0 else 0)
         if sign is None:
             sign, streak = s, 1

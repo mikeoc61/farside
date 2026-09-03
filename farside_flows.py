@@ -750,7 +750,11 @@ def briefing_line(payload):
     (other funds net-offset it, leaving a small residual), otherwise ``broad
     inflow``/``outflow`` (or ``mixed flows`` when flat). Only the primary window
     drives the classification; the longer windows are reported as context.
-    Appends ``today pending``/``{lead} pending``/``data stale`` notes.
+    Appends ``today pending``/``{lead} pending``/``fetch failed`` notes. The
+    last mirrors the block's ``FETCH-FAILED``: the flag records that a fetch
+    failed and a cache was served, not that the data in it is old. Age is a
+    separate question, and one this one-liner does not answer -- the block's
+    ``DATA-Nd-OLD`` does.
 
     Returns:
         A one-line summary string.
@@ -813,7 +817,7 @@ def briefing_line(payload):
             f"({' '.join(p['date'].split()[:2])}: {_abbr(posted)} ex-{lbl})"
         )
     if payload.get("stale"):
-        notes.append("data stale")
+        notes.append("fetch failed")
     if notes:
         line += "; " + "; ".join(notes)
     return line

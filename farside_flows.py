@@ -235,9 +235,16 @@ def parse_table(html, cfg):
     lead = cfg["lead"]
     soup = BeautifulSoup(html, "html.parser")
     for table in soup.find_all("table"):
+        # Farside opens ``<tbody>`` with a stray empty ``<tr>``, so the parser
+        # nests the real rows inside it. That wrapper reports every descendant
+        # cell -- thousands of them -- and its leading cells are the first
+        # row's, yielding a duplicate of the asset's launch day that inflates
+        # ``days_complete`` and can be double-counted by a window. Keep only
+        # innermost rows.
         rows = [
             [c.get_text(strip=True) for c in tr.find_all(["th", "td"])]
             for tr in table.find_all("tr")
+            if tr.find("tr") is None
         ]
         first_data = next(
             (i for i, c in enumerate(rows) if c and DATE_RE.match(c[0])), None
@@ -280,20 +287,36 @@ def _age_days(date_str):
         return None
 
 
-def _reported(data, want):
-    """Filter to days that actually have flow data.
+def _reported(data, funds):
+    """Filter to days that actually reported.
 
-    Drops trailing placeholder rows the site lists before numbers are published
-    (every wanted column ``None``/``0.0``), so summaries reflect real activity.
+    Two kinds of row are not days and must go: trailing rows the site lists
+    before numbers are published, and U.S. market closures, which Farside lists
+    with every fund blank and ``Total`` rendered ``0.0`` (16 such rows in the
+    BTC history -- MLK through the Jan 2025 day of mourning; none appear after
+    19 Jun 2025, so the site may have stopped emitting them, but the history
+    still contains them). Left in, a closure row becomes the newest reported day
+    on any holiday and ``partial`` announces an in-progress session that never
+    happened.
+
+    Both are identified by *blankness across the tracked funds*, never by a
+    value of ``0.0``. That distinction is the one :func:`parse_flow` goes out of
+    its way to preserve: ``0.0`` is a reported zero, blank/``-`` is not
+    reported. Testing ``Total`` for ``0.0`` instead would be a cheaper proxy and
+    a wrong one -- it discards real sessions on which every tracked fund
+    genuinely printed ``0.0``, of which the ETH history has twelve (05 Nov 2024
+    and 14 Aug 2026 among them, all ordinary trading days).
+
+    A day on which only untracked funds moved is dropped too. It could never be
+    ``complete``, and it has no tracked-fund story to tell as a partial.
 
     Args:
         data: Per-day rows from :func:`parse_table`.
-        want: Column names to inspect (``want_cols(cfg)``).
+        funds: The asset's tracked fund tickers (``cfg["funds"]``) -- not
+            ``want_cols``, whose ``Total`` is exactly the column a closure row
+            fills in.
     """
-    return [
-        r for r in data
-        if any(r.get(k) not in (None, 0.0) for k in want)
-    ]
+    return [r for r in data if any(r.get(k) is not None for k in funds)]
 
 
 def _other(row, funds):
@@ -443,8 +466,7 @@ def summarize(data, cfg, windows=DEFAULT_WINDOWS):
     windows = _windows(windows)
     lead = cfg["lead"]
     funds = cfg["funds"]
-    want = want_cols(cfg)
-    reported = _reported(data, want)
+    reported = _reported(data, funds)
     pending = bool(data) and bool(reported) and data[-1] is not reported[-1]
     # A day can be partially reported: funds (and a provisional Total) post
     # progressively, so a day's Total and direction are indeterminate until
@@ -572,7 +594,6 @@ def get_flows(asset=DEFAULT_ASSET, windows=DEFAULT_WINDOWS, rows=DEFAULT_ROWS):
     """
     cfg = {**ASSETS[asset], "asset": asset}
     cache = cache_path(asset)
-    want = want_cols(cfg)
     try:
         data, source = fetch_table(cfg)
         payload = {
@@ -582,7 +603,7 @@ def get_flows(asset=DEFAULT_ASSET, windows=DEFAULT_WINDOWS, rows=DEFAULT_ROWS):
             "summary": summarize(data, cfg, windows),
             "rows": [
                 _with_other(r, cfg["funds"])
-                for r in _reported(data, want)[-rows:]
+                for r in _reported(data, cfg["funds"])[-rows:]
             ],
         }
         payload["line"] = briefing_line(payload)

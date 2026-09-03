@@ -290,25 +290,31 @@ def _age_days(date_str):
 def _reported(data, funds):
     """Filter to days that actually reported.
 
-    Two kinds of row are not days and must go: trailing rows the site lists
-    before numbers are published, and U.S. market closures, which Farside lists
-    with every fund blank and ``Total`` rendered ``0.0`` (16 such rows in the
-    BTC history -- MLK through the Jan 2025 day of mourning; none appear after
-    19 Jun 2025, so the site may have stopped emitting them, but the history
-    still contains them). Left in, a closure row becomes the newest reported day
-    on any holiday and ``partial`` announces an in-progress session that never
-    happened.
+    Two kinds of row are not days and must go: U.S. market closures, and the
+    current day before its numbers are published. Left in, either becomes the
+    newest reported day and ``partial`` announces an in-progress session -- on a
+    holiday, one that never happened.
 
-    Both are identified by *blankness across the tracked funds*, never by a
-    value of ``0.0``. That distinction is the one :func:`parse_flow` goes out of
-    its way to preserve: ``0.0`` is a reported zero, blank/``-`` is not
-    reported. Testing ``Total`` for ``0.0`` instead would be a cheaper proxy and
-    a wrong one -- it discards real sessions on which every tracked fund
-    genuinely printed ``0.0``, of which the ETH history has twelve (05 Nov 2024
-    and 14 Aug 2026 among them, all ordinary trading days).
+    They are the same shape. Both print every fund blank with ``Total`` rendered
+    ``0.0``: the BTC history holds 16 closures (MLK through the Jan 2025 day of
+    mourning) and none after 19 Jun 2025, yet on 03 Sep 2026 all three assets
+    carried a row of exactly that shape -- an ordinary Thursday whose flows had
+    not posted yet. So the site did not stop emitting them; the shape simply
+    means two things, and nothing in the row says which. That is *why* this
+    tests fund blankness alone and never consults ``Total``: it does not need to
+    tell them apart, only to know that neither is a session with data.
+
+    Blankness, never a value of ``0.0``. That distinction is the one
+    :func:`parse_flow` goes out of its way to preserve: ``0.0`` is a reported
+    zero, blank/``-`` is not reported. Testing ``Total`` for ``0.0`` instead
+    would be a cheaper proxy and a wrong one -- it discards real sessions on
+    which every tracked fund genuinely printed ``0.0``, of which the ETH history
+    has twelve (05 Nov 2024 and 14 Aug 2026 among them, all ordinary trading
+    days).
 
     A day on which only untracked funds moved is dropped too. It could never be
-    ``complete``, and it has no tracked-fund story to tell as a partial.
+    ``complete``, and it has no tracked-fund story to tell as a partial. No such
+    row occurs in any of the three histories.
 
     Args:
         data: Per-day rows from :func:`parse_table`.

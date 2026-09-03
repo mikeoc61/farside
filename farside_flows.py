@@ -296,13 +296,18 @@ def _reported(data, funds):
     holiday, one that never happened.
 
     They are the same shape. Both print every fund blank with ``Total`` rendered
-    ``0.0``: the BTC history holds 16 closures (MLK through the Jan 2025 day of
-    mourning) and none after 19 Jun 2025, yet on 03 Sep 2026 all three assets
-    carried a row of exactly that shape -- an ordinary Thursday whose flows had
-    not posted yet. So the site did not stop emitting them; the shape simply
-    means two things, and nothing in the row says which. That is *why* this
-    tests fund blankness alone and never consults ``Total``: it does not need to
-    tell them apart, only to know that neither is a session with data.
+    ``0.0``.
+
+    The site did stop listing closures: the BTC history holds 16 (MLK through
+    the Jan 2025 day of mourning), the last on 19 Jun 2025, and of the 11 U.S.
+    market holidays since then it lists none. The *shape* did not stop -- on
+    03 Sep 2026 all three assets carried one, an ordinary Thursday whose flows
+    had not posted yet. Both are true, and reading either fact as the other is
+    the mistake: one shape, two meanings, nothing in the row to say which.
+
+    That is *why* this tests fund blankness alone and never consults ``Total``:
+    it does not need to tell them apart, only to know that neither is a session
+    with data.
 
     Blankness, never a value of ``0.0``. That distinction is the one
     :func:`parse_flow` goes out of its way to preserve: ``0.0`` is a reported
@@ -312,9 +317,14 @@ def _reported(data, funds):
     has twelve (05 Nov 2024 and 14 Aug 2026 among them, all ordinary trading
     days).
 
-    A day on which only untracked funds moved is dropped too. It could never be
-    ``complete``, and it has no tracked-fund story to tell as a partial. No such
-    row occurs in any of the three histories.
+    A day on which only untracked funds moved is dropped too -- a deliberate
+    choice, and the one point where a Total-consulting predicate would differ.
+    Not a limitation: ``_partial`` carries ``other``, and :func:`briefing_line`
+    already sums it, so such a row would render as "all four pending, +42.0M
+    ex-tracked". It is dropped because a day on which no tracked fund posted
+    says nothing about the funds this asset follows. No such row occurs in any
+    of the three histories, so this decides a hypothetical -- revisit it on
+    evidence, not on symmetry.
 
     Args:
         data: Per-day rows from :func:`parse_table`.

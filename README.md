@@ -401,11 +401,22 @@ journalctl --user -u farside-flows.service -n 20
 
 ### Refreshing additional assets
 
-The bundled `farside-flows.timer` refreshes BTC only. To cover ETH and SOL too,
-either duplicate the unit pair with the asset in `ExecStart` (e.g.
-`ExecStart=%h/.local/bin/farside_flows eth`), or — cleaner — replace the single
-unit with a systemd template so one pair serves every asset (`%i` is the
-instance name):
+The bundled `farside-flows.timer` refreshes BTC only.
+
+> **Check first whether something already refreshes the other assets.** Any
+> external scheduler that invokes `farside_flows <asset>` covers this already —
+> on the author's box the openclaw scheduler drives ETH and SOL, so the units
+> below would refresh those assets twice. The timers here are for a standalone
+> install.
+>
+> A stale `farside_<asset>.json` is not on its own evidence that no schedule
+> exists: nothing in this repo, and nothing in `systemctl --user list-timers`,
+> can see an external one.
+
+To cover ETH and SOL from systemd instead, either duplicate the unit pair with
+the asset in `ExecStart` (e.g. `ExecStart=%h/.local/bin/farside_flows eth`), or
+— cleaner — replace the single unit with a systemd template so one pair serves
+every asset (`%i` is the instance name):
 
 ```ini
 # ~/.config/systemd/user/farside-flows@.service

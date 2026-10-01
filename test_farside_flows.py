@@ -132,6 +132,51 @@ class ReportedFilter(unittest.TestCase):
         self.assertEqual(s["latest_total"], 0.0)
 
 
+def inflow_days(n, start=1, each=20.0):
+    return outflow_days(n, start, each)
+
+
+class PriorStreak(unittest.TestCase):
+    """The run the latest day broke, counted over history rather than ``rows``."""
+
+    def test_run_longer_than_the_rows_window_is_counted_in_full(self):
+        """30 Sep 2026: a 9-day BTC inflow run read as 4 from five rows."""
+        days = outflow_days(2) + inflow_days(9, start=3) + outflow_days(1, start=12)
+        s = ff.summarize(days, CFG)
+        self.assertEqual((s["streak_days"], s["streak_sign"]), (1, "outflow"))
+        self.assertEqual((s["prior_streak_days"], s["prior_streak_sign"]), (9, "inflow"))
+        self.assertFalse(s["prior_streak_capped"])
+        line = ff.briefing_line({"summary": s})
+        self.assertIn("1d outflow, ended 9d inflow", line)
+
+    def test_run_reaching_the_oldest_day_is_a_floor(self):
+        s = ff.summarize(inflow_days(7) + outflow_days(1, start=8), CFG)
+        self.assertEqual(s["prior_streak_days"], 7)
+        self.assertTrue(s["prior_streak_capped"])
+        self.assertIn("ended ≥7d inflow", ff.briefing_line({"summary": s}))
+
+    def test_zero_day_is_its_own_run(self):
+        days = (
+            inflow_days(3)
+            + [row("04 Jan 2026", aaa=0.0, bbb=0.0, total=0.0)]
+            + outflow_days(2, start=5)
+        )
+        s = ff.summarize(days, CFG)
+        self.assertEqual((s["streak_days"], s["streak_sign"]), (2, "outflow"))
+        self.assertEqual((s["prior_streak_days"], s["prior_streak_sign"]), (1, "flat"))
+
+    def test_no_prior_run_when_history_is_one_run(self):
+        s = ff.summarize(outflow_days(4), CFG)
+        self.assertIsNone(s["prior_streak_days"])
+        self.assertTrue(ff.briefing_line({"summary": s}).count("4d outflow —"))
+
+    def test_older_cache_without_prior_fields_still_renders(self):
+        s = ff.summarize(outflow_days(6), CFG)
+        for k in ("prior_streak_days", "prior_streak_sign", "prior_streak_capped"):
+            del s[k]
+        self.assertIn("streak: 6d outflow", ff.briefing_block({"summary": s}))
+
+
 class ParseFlow(unittest.TestCase):
     def test_reported_zero_is_distinct_from_a_blank_cell(self):
         self.assertEqual(ff.parse_flow("0.0"), 0.0)

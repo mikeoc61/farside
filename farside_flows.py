@@ -473,7 +473,10 @@ def summarize(data, cfg, windows=DEFAULT_WINDOWS):
 
         Also ``streak_days`` and ``streak_sign``
         (``inflow``/``outflow``/``flat``) for the run of consecutive same-sign
-        Total days. All latest/streak/window metrics are computed over
+        Total days, and ``prior_streak_days``/``prior_streak_sign`` for the run
+        it broke (see :func:`_runs`), with ``prior_streak_capped`` set when that
+        run reaches the start of the available history and its length is only
+        a floor. All latest/streak/window metrics are computed over
         fully-reported days only (every tracked fund posted *and* a published
         ``Total``); they are ``None``/zero when no such day exists yet. A day
         the site never published a ``Total`` for is absent from every one of
@@ -528,22 +531,14 @@ def summarize(data, cfg, windows=DEFAULT_WINDOWS):
             **flat,
             "streak_days": 0,
             "streak_sign": "flat",
+            "prior_streak_days": None,
+            "prior_streak_sign": None,
+            "prior_streak_capped": None,
         }
     latest = complete[-1]
-    sign = None
-    streak = 0
-    for r in reversed(complete):
-        # ``complete`` guarantees a published Total, so there is no None case to
-        # break on here; a day without one is excluded upstream rather than
-        # truncating the run at the point it is met.
-        v = r["Total"]
-        s = 1 if v > 0 else (-1 if v < 0 else 0)
-        if sign is None:
-            sign, streak = s, 1
-        elif s == sign and s != 0:
-            streak += 1
-        else:
-            break
+    runs = _runs(complete, 2)
+    sign, streak, _ = runs[0]
+    prior = runs[1] if len(runs) > 1 else None
     return {
         **base,
         "as_of": latest["date"],
@@ -557,12 +552,47 @@ def summarize(data, cfg, windows=DEFAULT_WINDOWS):
         "windows": nets,
         **flat,
         "streak_days": streak,
-        "streak_sign": (
-            "inflow" if sign and sign > 0
-            else "outflow" if sign and sign < 0
-            else "flat"
-        ),
+        "streak_sign": _sign_name(sign),
+        "prior_streak_days": prior[1] if prior else None,
+        "prior_streak_sign": _sign_name(prior[0]) if prior else None,
+        "prior_streak_capped": prior[2] if prior else None,
     }
+
+
+def _sign_name(sign):
+    return "inflow" if sign > 0 else "outflow" if sign < 0 else "flat"
+
+
+def _runs(complete, n):
+    """The newest ``n`` runs of consecutive same-sign ``Total`` days.
+
+    The run before the current one is what a reader means by "ending an N-day
+    inflow streak", and it cannot be recovered from the payload's few ``rows``:
+    with five rows, any run longer than four reads as four. So it is computed
+    here, over the full history, instead of being left to whoever reads them.
+
+    A zero-``Total`` day is a run of its own, always one day long. ``complete``
+    guarantees a published Total, so there is no None case to break on; a day
+    without one is excluded upstream rather than truncating the run where it is
+    met.
+
+    Returns:
+        Up to ``n`` ``(sign, days, capped)`` tuples, newest first. ``capped`` is
+        ``True`` when the run reaches the oldest day available, so ``days`` is
+        a floor -- the source may simply not go back far enough to see it end.
+    """
+    runs = []
+    for i in range(len(complete) - 1, -1, -1):
+        v = complete[i]["Total"]
+        s = 1 if v > 0 else (-1 if v < 0 else 0)
+        if runs and s == runs[-1][0] and s != 0:
+            runs[-1][1] += 1
+        elif len(runs) == n:
+            break
+        else:
+            runs.append([s, 1, False])
+        runs[-1][2] = i == 0
+    return [tuple(r) for r in runs]
 
 
 def cache_path(asset):
@@ -722,8 +752,23 @@ def briefing_block(payload):
             )
         else:
             lines.append(f"{label} n/a ({w['days_available']}d available)")
-    lines.append(f"  streak: {s['streak_days']}d {s['streak_sign']}")
+    lines.append(f"  streak: {_streak(s)}")
     return "\n".join(lines)
+
+
+def _streak(s):
+    """Render the streak with the run it ended, e.g. ``1d outflow, ended 9d inflow``.
+
+    The prior run is named outright because the payload's ``rows`` are too few
+    to count it from: a reader who tries will find at most ``rows - 1`` days.
+    ``≥`` marks a prior run that reached the start of the available history.
+    Older cached payloads carry no prior run and render as before.
+    """
+    out = f"{s['streak_days']}d {s['streak_sign']}"
+    if s.get("prior_streak_days"):
+        floor = "≥" if s.get("prior_streak_capped") else ""
+        out += f", ended {floor}{s['prior_streak_days']}d {s['prior_streak_sign']}"
+    return out
 
 
 def _abbr(v):
@@ -797,7 +842,7 @@ def briefing_line(payload):
         f"{s['asset'].upper()} ETF Flows: {_abbr(s['latest_total'])} ({asof_short}, "
         f"{lead} {_abbr(s['latest_lead'])}) | "
         f"{pd}d net {_abbr(wt)} | {lead} {pd}d {_abbr(wl)}{share_txt}{extra} | "
-        f"{s['streak_days']}d {s['streak_sign']} — {tag}"
+        f"{_streak(s)} — {tag}"
     )
     notes = []
     if s.get("pending_today"):
